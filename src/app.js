@@ -18,7 +18,40 @@ const app = express();
 app.set("trust proxy", 1);
 
 app.use(helmet());
-app.use(cors());
+
+// CORS — alleen relevant voor de browser (Flutter web). De native apps
+// (Android/iOS/Windows) doen geen preflight en worden hier niet geraakt.
+//
+// We reflecteren de toegestane origin terug i.p.v. "*", zodat het ook klopt
+// als er ooit credentials (cookies) bijkomen. JWT zit nu in de Authorization-
+// header — dat is géén "credentialed" request, dus Allow-Credentials is niet
+// nodig.
+//
+// Toegestaan: elke localhost/127.0.0.1-origin (de Flutter web-dev-server kiest
+// elke run een willekeurige poort), plus de expliciete productie-origins uit
+// CORS_ORIGINS (komma-gescheiden). Requests zonder Origin-header (native apps,
+// curl, server-to-server) worden altijd doorgelaten.
+const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+const allowedOrigins = (process.env.CORS_ORIGINS || "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) return callback(null, true); // native app / curl: geen Origin
+    if (LOCALHOST_ORIGIN.test(origin)) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(null, false); // niet toegestaan: geen CORS-headers, browser blokkeert
+  },
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
+// Preflight (OPTIONS) voor álle routes expliciet afhandelen.
+app.options(/.*/, cors(corsOptions));
+
 app.use(express.json({ limit: "1mb" }));
 
 // Request-log zonder query string: die kan tokens bevatten (/auth/verify-email, /ws).
