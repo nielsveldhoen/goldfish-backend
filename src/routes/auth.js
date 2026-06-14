@@ -9,6 +9,11 @@ import { authMiddleware } from "../middleware/auth.js";
 
 const router = express.Router();
 
+// Verificatietokens worden gehasht opgeslagen; alleen de hash staat in de DB,
+// de gebruiker krijgt het ruwe token per mail.
+const hashToken = (token) =>
+  crypto.createHash("sha256").update(token).digest("hex");
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -28,13 +33,15 @@ router.get("/ping", (req, res) => {
 // REGISTER
 // ========================
 router.post("/register", authLimiter, async (req, res) => {
-  console.log("registering in backend: auth.js");
-
   const { email, password } = req.body;
   const username = req.body.username;
 
   if (!email || !password) {
     return res.status(400).json({ error: "Missing fields" });
+  }
+
+  if (typeof password !== "string" || password.length < 8) {
+    return res.status(400).json({ error: "Password must be at least 8 characters" });
   }
 
   const emailNormalized = email.toLowerCase().trim();
@@ -58,7 +65,7 @@ router.post("/register", authLimiter, async (req, res) => {
     await pool.query(
       `INSERT INTO email_verification_tokens (user_id, token, expires_at)
        VALUES ($1, $2, $3)`,
-      [user.id, token, expiresAt]
+      [user.id, hashToken(token), expiresAt]
     );
 
     await sendVerificationEmail(emailNormalized, token);
@@ -144,9 +151,11 @@ router.get("/verify-email", async (req, res) => {
   }
 
   try {
+    // Single-use: verwijder het token direct bij het opvragen, zodat een
+    // tweede poging met hetzelfde token altijd faalt.
     const result = await pool.query(
-      `SELECT * FROM email_verification_tokens WHERE token = $1`,
-      [token]
+      `DELETE FROM email_verification_tokens WHERE token = $1 RETURNING *`,
+      [hashToken(token)]
     );
 
     const record = result.rows[0];
@@ -158,11 +167,6 @@ router.get("/verify-email", async (req, res) => {
     await pool.query(
       `UPDATE users SET email_verified = true WHERE id = $1`,
       [record.user_id]
-    );
-
-    await pool.query(
-      `DELETE FROM email_verification_tokens WHERE token = $1`,
-      [token]
     );
 
     res.json({ message: "Email verified successfully" });
@@ -208,7 +212,7 @@ router.post("/resend-verification", authLimiter, async (req, res) => {
     await pool.query(
       `INSERT INTO email_verification_tokens (user_id, token, expires_at)
        VALUES ($1, $2, $3)`,
-      [user.id, token, expiresAt]
+      [user.id, hashToken(token), expiresAt]
     );
 
     await sendVerificationEmail(user.email, token);

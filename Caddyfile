@@ -1,0 +1,32 @@
+# Goldfish reverse proxy — TLS-terminatie met automatische Let's Encrypt-certificaten.
+#
+# Vereisten:
+#   - Een domeinnaam met een A-record (en evt. AAAA) naar het IP van deze server.
+#   - Poort 80 en 443 open in de firewall (80 is nodig voor de ACME-challenge
+#     en de automatische redirect naar https).
+#   - GOLDFISH_DOMAIN als environment variable voor het caddy-proces,
+#     bijv. in /etc/caddy/caddy.env: GOLDFISH_DOMAIN=api.goldfish.example
+#
+# WebSockets (/ws) werken out-of-the-box: Caddy proxy't Upgrade-requests
+# automatisch door, er is geen aparte configuratie nodig.
+
+{$GOLDFISH_DOMAIN} {
+	encode gzip
+
+	reverse_proxy 127.0.0.1:3000
+
+	# Access logging staat in Caddy standaard UIT. Deze log-directive is
+	# bewust geconfigureerd met een filter dat de query string redigeert:
+	# /ws?token=<jwt> en /auth/verify-email?token=... mogen nooit leesbaar
+	# in access logs belanden. Verwijder dit blok als je helemaal geen
+	# access logs wilt.
+	log {
+		output file /var/log/caddy/goldfish-access.log
+		format filter {
+			wrap json
+			request>uri query {
+				replace token REDACTED
+			}
+		}
+	}
+}

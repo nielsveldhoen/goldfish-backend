@@ -2,13 +2,68 @@
 
 ## Overzicht
 
-- **Base URL:** `http://localhost:3000`
-- **Formaat:** JSON (altijd `Content-Type: application/json` meesturen bij POST/PUT)
-- **Authenticatie:** JWT Bearer token — stuur bij beveiligde endpoints:
+- **Base URL:** productie `https://<domein>` (TLS via reverse proxy), lokaal `http://localhost:3000`
+- **Formaat:** JSON (altijd `Content-Type: application/json` meesturen bij POST/PUT). Request-body's groter dan 1 MB worden geweigerd.
+- **Authenticatie:** JWT Bearer token — stuur bij beveiligde endpoints (🔒):
   ```
   Authorization: Bearer <token>
   ```
 - **Token geldigheid:** 7 dagen
+- **401-semantiek:** een ontbrekend, ongeldig of verlopen token geeft op élk beveiligd endpoint altijd exact `401`. `403` betekent: geldig token, maar de resource is van een andere gebruiker (of: e-mail nog niet geverifieerd bij login).
+
+---
+
+## API-versionering
+
+Alle endpoints zijn bereikbaar onder drie prefixen:
+
+| Prefix | Veldnamen | Voor wie |
+|---|---|---|
+| *(geen)* — bijv. `/review/due` | oude namen (`ltm`/`stm`) | al uitgerolde appversies; identiek aan v1 |
+| `/v1/...` | oude namen (`ltm`/`stm`) | expliciet v1 |
+| `/v2/...` | nieuwe namen (`remote`/`stable`/`recent`) | nieuwe clients |
+
+Beide versies werken op **dezelfde data**; de database houdt oude en nieuwe kolommen synchroon. Nieuwe clients gebruiken `/v2`.
+
+**Veldnaam-mapping (v1 → v2):**
+
+| v1 | v2 |
+|---|---|
+| `ltm_score` | `remote_score` |
+| `stm_score` | `stable_score` |
+| `ltm_cards_practiced` | `remote_cards_practiced` |
+| `ltm_correct_first_try` | `remote_correct_first_try` |
+| `avg_ltm_score` | `avg_remote_score` |
+| `avg_stm_score` | `avg_stable_score` |
+| `total_ltm_cards` | `total_remote_cards` |
+| `total_ltm_count` | `total_remote_count` |
+| — | `recent_score` *(nieuw, alleen v2)* |
+| — | `avg_recent_score` *(nieuw, alleen v2)* |
+
+**Alleen in v2 — `recent`:**
+- `recent_score` (smallint, default 0) op het voortgangsobject. Optioneel bij `POST /v2/review/progress`; **weggelaten = waarde blijft onveranderd** (een v1-write reset `recent_score` dus ook niet).
+- `avg_recent_score` (numeric, nullable) in `deck_delta`/`daily_snapshot` bij `POST /v2/stats/update` en in de stats-responses. Weggelaten = bestaande waarde blijft staan.
+- v2-responses van `/review/due`, `/review/deck/:id`, `/review/progress`, `/sync/changes`, `/stats/*` en de summaries bevatten de recent-velden; v1-responses **niet**.
+
+**Endpoint-alias:** `GET /review/ltm/summary` heet in v2 `GET /v2/review/remote/summary` (respons: `total_remote_count`, `due_count`, `avg_remote_score`, `avg_stable_score`, `avg_recent_score`). Het oude pad blijft onder alle prefixen werken.
+
+**`GET /version`** (zonder auth) meldt de beschikbare versies en de ondergrens:
+```json
+{ "versions": ["v1", "v2"], "latest": "v2", "min": "v1" }
+```
+
+**Afsluiten van oude versies:** de server kan geconfigureerd worden met een minimumversie (`MIN_API_VERSION`). Calls naar een versie onder die grens — inclusief de ongeprefixte legacy-paden — krijgen dan op élk endpoint:
+
+```json
+HTTP 410 Gone
+{ "error": "api_version_unsupported", "min_version": "v2" }
+```
+
+`GET /version` blijft altijd bereikbaar (en toont dan alleen nog de ondersteunde versies); clients horen bij het opstarten te checken of hun versie in `versions` staat en anders een update-melding te tonen.
+
+**WebSocket:** de payloads van `/ws`-events (`progress_saved`, `core_set`, `progress_deleted`) bevatten **beide** naamsets (oud én nieuw, incl. `recent_score`). Clients moeten onbekende velden negeren en hun eigen naamset uitlezen.
+
+> De rest van dit document beschrijft de endpoints met **v1-veldnamen**. Voor `/v2` geldt overal de bovenstaande naamtabel; verder zijn paden, statuscodes en semantiek identiek.
 
 ---
 
@@ -23,7 +78,7 @@ Registreer een nieuwe gebruiker. Na registratie wordt een verificatiemail gestuu
 ```json
 {
   "email": "user@example.com",
-  "password": "geheimwachtwoord",
+  "password": "geheimwachtwoord",   // minimaal 8 tekens
   "username": "niels"   // optioneel — wordt afgeleid van email als weggelaten
 }
 ```
@@ -36,7 +91,7 @@ Registreer een nieuwe gebruiker. Na registratie wordt een verificatiemail gestuu
 ```
 
 **Foutcodes:**
-- `400` — ontbrekende velden of email/username bestaat al
+- `400` — ontbrekende velden, wachtwoord korter dan 8 tekens, of email/username bestaat al
 
 ---
 
@@ -74,7 +129,7 @@ Login met email of username.
 ---
 
 ### GET `/auth/verify-email`
-Bevestig het e-mailadres via de token uit de verificatiemail. Token is 24 uur geldig.
+Bevestig het e-mailadres via de token uit de verificatiemail. Token is 24 uur geldig en single-use: na een geslaagde verificatie is hij verbruikt en geeft dezelfde link `400`.
 
 **Query params:**
 - `token` — de verificatietoken uit de mail
@@ -468,7 +523,8 @@ Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie
   "due_date": "2024-02-01",
   "repetitions": "...",
   "is_core": true,
-  "updated_at": "2024-02-01T00:00:00.000Z"
+  "updated_at": "2024-02-01T00:00:00.000Z",
+  "deleted_at": null
 }
 ```
 
@@ -480,6 +536,26 @@ Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie
   ```json
   { "error": "stale_write", "current": { /* huidig voortgangsobject */ } }
   ```
+
+---
+
+### DELETE `/review/progress/:card_id` 🔒
+Reset de voortgang van één kaart voor de ingelogde gebruiker (soft-delete van het voortgangsrecord). De kaart zelf blijft bestaan en telt daarna weer als "nieuw".
+
+Idempotent: ook als er geen (actief) voortgangsrecord was, is de response `200`.
+
+**Response `200`:**
+```json
+{ "message": "Progress reset" }
+```
+
+**Foutcodes:**
+- `403` — kaart is niet van deze gebruiker
+- `404` — kaart bestaat niet
+
+**Sync naar andere apparaten:** het voortgangsrecord krijgt `deleted_at` gezet en verschijnt daarmee in `/sync/changes`. Clients moeten een progress-record met `deleted_at != null` behandelen als "verwijder het lokale voortgangsrecord van deze kaart". **Let op:** de overige velden van zo'n record (`ltm_score`, `due_date`, `repetitions`, …) bevatten nog de oude waarden van vóór de reset — die dus niet toepassen. Daarnaast wordt realtime het WebSocket-event `progress_deleted` gebroadcast.
+
+Een nieuwe review van dezelfde kaart (POST `/review/progress`) maakt het record weer actief (`deleted_at` wordt `null`); de server behoudt daarbij de bestaande `is_core`-waarde van het record, tenzij `is_core` expliciet wordt meegestuurd.
 
 ---
 
@@ -567,11 +643,14 @@ Geeft alle decks, kaarten en voortgangsrecords terug die gewijzigd zijn na `sinc
       "due_date": "...",
       "repetitions": "...",
       "is_core": true,
-      "updated_at": "..."
+      "updated_at": "...",
+      "deleted_at": null
     }
   ]
 }
 ```
+
+> **Progress-resets:** een progress-record met `deleted_at != null` betekent dat de voortgang van die kaart gereset is (via DELETE `/review/progress/:card_id`, mogelijk op een ander apparaat). Verwijder dan het lokale voortgangsrecord; de kaart telt weer als nieuw.
 
 **Foutcodes:**
 - `400` — `since` ontbreekt of ongeldig formaat
@@ -713,10 +792,11 @@ Realtime push-notificaties voor alle schrijfoperaties. De server broadcast naar 
 ### Verbinding maken
 
 ```
-ws://localhost:3000/ws?token=<jwt>
+wss://<domein>/ws?token=<jwt>        (productie)
+ws://localhost:3000/ws?token=<jwt>   (lokaal)
 ```
 
-Het JWT-token wordt als query-parameter meegestuurd. Bij een ongeldig of ontbrekend token sluit de server de verbinding met sluitcode `4001`.
+Het JWT-token wordt als query-parameter meegestuurd. Bij een ongeldig of ontbrekend token sluit de server de verbinding met sluitcode `4001`. Verloopt het token terwijl de verbinding openstaat, dan sluit de server de verbinding eveneens met `4001`. Bij `4001` moet de client **niet** automatisch reconnecten, maar opnieuw inloggen.
 
 ### Berichtformaat
 
@@ -741,10 +821,15 @@ Alle berichten zijn JSON:
 | `card_deleted`    | DELETE `/cards/:id`                  | `{ "id": "uuid", "deck_id": "uuid" }` |
 | `progress_saved`  | POST `/review/progress` (modus 1)    | voortgangsobject                 |
 | `core_set`        | POST `/review/progress` (modus 2)    | voortgangsobject                 |
+| `progress_deleted`| DELETE `/review/progress/:card_id`   | voortgangsobject (met `deleted_at` gezet) |
 
-### Ping/pong
+> **Let op:** de payload van `progress_saved`, `core_set` en `progress_deleted` is het voortgangsobject en bevat dus **geen** `deck_id` — wel `card_id`. Clients die het bijbehorende deck nodig hebben, moeten dat lokaal opzoeken via de kaart. Bij `progress_deleted` bevatten de overige velden nog de oude waarden van vóór de reset; alleen de verwijdering toepassen.
 
-De server reageert op WebSocket `ping`-frames met een `pong`. Gebruik dit om de verbinding levend te houden.
+### Ping/pong en berichten van de client
+
+- De server beantwoordt WebSocket `ping`-frames altijd met een `pong`-frame. Gebruik dit om de verbinding levend te houden.
+- De server stuurt zelf periodiek (elke ~30 s) een `ping`-frame en sluit verbindingen die niet binnen ~60 s ponggen. Native WebSocket-implementaties beantwoorden pings automatisch; daar hoeft de client niets voor te doen.
+- Tekstberichten van de client maken geen deel uit van het protocol en worden genegeerd (ook onparseerbare, zoals de losse string `"ping"` van oudere clients); ze veroorzaken nooit een disconnect.
 
 ---
 
