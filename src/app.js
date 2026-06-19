@@ -9,7 +9,7 @@ import cardRoutes from "./routes/cards.js";
 import reviewRoutes from "./routes/review.js";
 import syncRoutes from "./routes/sync.js";
 import statsRoutes from "./routes/stats.js";
-import { apiVersion, minApiVersion } from "./middleware/apiVersion.js";
+import { requireClientVersion, minClientBuild } from "./middleware/clientVersion.js";
 
 const app = express();
 
@@ -45,7 +45,7 @@ const corsOptions = {
     return callback(null, false); // niet toegestaan: geen CORS-headers, browser blokkeert
   },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Client-Build"],
 };
 
 app.use(cors(corsOptions));
@@ -61,9 +61,7 @@ app.use((req, _res, next) => {
   next();
 });
 
-// routes — één router, gemount per API-versie. De handlers gebruiken intern
-// de nieuwe veldnamen (remote/stable/recent); apiVersion vertaalt voor v1
-// van/naar de oude namen (ltm/stm).
+// routes — één router met één naamset (remote/core/stable/recent).
 const api = express.Router();
 api.use("/auth", authRoutes);
 api.use("/decks", deckRoutes);
@@ -72,19 +70,26 @@ api.use("/review", reviewRoutes);
 api.use("/sync", syncRoutes);
 api.use("/stats", statsRoutes);
 
-app.get("/version", (req, res) => {
-  const min = minApiVersion();
-  const versions = [1, 2].filter((v) => v >= min).map((v) => `v${v}`);
-  res.json({ versions, latest: "v2", min: `v${min}` });
+// Open discovery-endpoint: nooit achter de client-versiegate, zodat een te oude
+// client hier kan zien dat hij moet updaten (min_client_build = vereiste
+// Flutter buildNumber).
+app.get("/version", async (req, res) => {
+  let minBuild = 0;
+  try {
+    minBuild = await minClientBuild();
+  } catch (err) {
+    console.error("/version: config-lookup mislukt", err);
+  }
+  res.json({ versions: ["v2"], latest: "v2", min: "v2", min_client_build: minBuild });
 });
 
 app.get("/", (req, res) => {
   res.send("Goldfish API running 🐟");
 });
 
-app.use("/v1", apiVersion(1), api);
-app.use("/v2", apiVersion(2), api);
-// Ongeprefixte paden blijven werken voor al uitgerolde appversies (= v1).
-app.use("/", apiVersion(1), api);
+// Alle API-routes zitten onder een expliciet versie-prefix en achter de
+// client-versiegate. Nu alleen /v2; een toekomstige versie krijgt een eigen
+// mount (bijv. app.use("/v3", apiV3)).
+app.use("/v2", requireClientVersion, api);
 
 export default app;

@@ -27,7 +27,7 @@ const PROTECTED_ENDPOINTS = [
   ["post", "/review/progress"],
   ["delete", `/review/progress/${FAKE_UUID}`],
   ["get", "/review/decks/summary"],
-  ["get", "/review/ltm/summary"],
+  ["get", "/review/core/summary"],
   ["get", "/sync/changes?since=2026-01-01T00:00:00.000Z"],
   ["post", "/stats/update"],
   ["get", `/stats/deck/${FAKE_UUID}`],
@@ -46,7 +46,7 @@ describe("401-semantiek op alle beveiligde endpoints", () => {
   for (const [method, path] of PROTECTED_ENDPOINTS) {
     for (const [label, header] of INVALID_AUTH_VARIANTS) {
       test(`${method.toUpperCase()} ${path} ${label} → 401`, async () => {
-        let req = request(app)[method](path);
+        let req = request(app)[method](`/v2${path}`);
         if (header) req = req.set("Authorization", header);
         const res = await req.send({});
         assert.equal(

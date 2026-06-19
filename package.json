@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
-    "test": "node --test test/",
+    "test": "node --test --test-concurrency=1 test/",
     "migrate": "node scripts/migrate_email_verification.js && node scripts/migrate_progress_deleted_at.js && node scripts/migrate_hash_verification_tokens.js"
   },
   "keywords": [],

@@ -43,21 +43,21 @@ describe("DELETE /review/progress/:card_id", () => {
 
     // 1. Reset → 200
     const res = await request(app)
-      .delete(`/review/progress/${card.id}`)
+      .delete(`/v2/review/progress/${card.id}`)
       .set("Authorization", `Bearer ${token}`);
     assert.equal(res.status, 200);
     assert.deepEqual(res.body, { message: "Progress reset" });
 
     // 2. Idempotent: nogmaals → ook 200
     const res2 = await request(app)
-      .delete(`/review/progress/${card.id}`)
+      .delete(`/v2/review/progress/${card.id}`)
       .set("Authorization", `Bearer ${token}`);
     assert.equal(res2.status, 200);
     assert.deepEqual(res2.body, { message: "Progress reset" });
 
     // 3. Zichtbaar via /sync/changes als progress-record met deleted_at
     const syncRes = await request(app)
-      .get(`/sync/changes?since=${encodeURIComponent(since)}`)
+      .get(`/v2/sync/changes?since=${encodeURIComponent(since)}`)
       .set("Authorization", `Bearer ${token}`);
     assert.equal(syncRes.status, 200);
     const deleted = syncRes.body.progress.find((p) => p.card_id === card.id);
@@ -66,7 +66,7 @@ describe("DELETE /review/progress/:card_id", () => {
 
     // 4. Kaart telt weer als nieuw / zonder voortgang
     const deckRes = await request(app)
-      .get(`/review/deck/${deck.id}`)
+      .get(`/v2/review/deck/${deck.id}`)
       .set("Authorization", `Bearer ${token}`);
     assert.equal(deckRes.status, 200);
     const entry = deckRes.body.find((c) => c.id === card.id);
@@ -75,30 +75,30 @@ describe("DELETE /review/progress/:card_id", () => {
 
     // 5. Opnieuw reviewen maakt een vers (niet-deleted) record
     const upsert = await request(app)
-      .post("/review/progress")
+      .post("/v2/review/progress")
       .set("Authorization", `Bearer ${token}`)
-      .send({ card_id: card.id, ltm_score: 1, due_date: "2026-07-01" });
+      .send({ card_id: card.id, remote_score: 1, due_date: "2026-07-01" });
     assert.equal(upsert.status, 200);
     assert.equal(upsert.body.deleted_at, null, "nieuwe review heft de soft-delete op");
   });
 
   test("kaart van een andere gebruiker → 403", async () => {
     const res = await request(app)
-      .delete(`/review/progress/${card.id}`)
+      .delete(`/v2/review/progress/${card.id}`)
       .set("Authorization", `Bearer ${otherToken}`);
     assert.equal(res.status, 403);
   });
 
   test("onbestaande kaart → 404", async () => {
     const res = await request(app)
-      .delete(`/review/progress/${FAKE_UUID}`)
+      .delete(`/v2/review/progress/${FAKE_UUID}`)
       .set("Authorization", `Bearer ${token}`);
     assert.equal(res.status, 404);
   });
 
   test("ongeldig uuid-formaat → 404", async () => {
     const res = await request(app)
-      .delete("/review/progress/not-a-uuid")
+      .delete("/v2/review/progress/not-a-uuid")
       .set("Authorization", `Bearer ${token}`);
     assert.equal(res.status, 404);
   });

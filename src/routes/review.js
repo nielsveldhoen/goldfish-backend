@@ -321,15 +321,15 @@ router.get("/decks/summary", authMiddleware, async (req, res) => {
 });
 
 // ========================
-// GET REMOTE (voorheen LTM) SUMMARY
+// GET CORE SUMMARY
 // ========================
-// Zelfde endpoint onder twee paden: /ltm/summary (v1-naam) en
-// /remote/summary (v2-naam). De veldnamen vertaalt apiVersion per versie.
-router.get(["/ltm/summary", "/remote/summary"], authMiddleware, async (req, res) => {
+// Overzicht van de core-kaarten (is_core = true) — gaat over het kaarttype,
+// niet over de remote-score.
+router.get("/core/summary", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT
-        COUNT(*) AS total_remote_count,
+        COUNT(*) AS total_core_count,
         COUNT(*) FILTER (WHERE ucp.due_date <= CURRENT_DATE) AS due_count,
         ROUND(AVG(ucp.remote_score)::numeric, 2) AS avg_remote_score,
         ROUND(AVG(ucp.stable_score)::numeric, 2) AS avg_stable_score,

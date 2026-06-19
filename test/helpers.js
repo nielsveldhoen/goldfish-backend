@@ -45,7 +45,7 @@ export async function createCard(deckId) {
 
 export async function createProgress(userId, cardId) {
   const result = await pool.query(
-    `INSERT INTO user_card_progress (user_id, card_id, ltm_score, stm_score, due_date, repetitions, is_core)
+    `INSERT INTO user_card_progress (user_id, card_id, remote_score, stable_score, due_date, repetitions, is_core)
      VALUES ($1, $2, 2, 1, '2026-01-01', 'x', false) RETURNING *`,
     [userId, cardId]
   );

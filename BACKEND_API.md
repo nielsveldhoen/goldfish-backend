@@ -13,57 +13,48 @@
 
 ---
 
-## API-versionering
+## Veldnamen
 
-Alle endpoints zijn bereikbaar onder drie prefixen:
+De backend kent één naamset:
 
-| Prefix | Veldnamen | Voor wie |
-|---|---|---|
-| *(geen)* — bijv. `/review/due` | oude namen (`ltm`/`stm`) | al uitgerolde appversies; identiek aan v1 |
-| `/v1/...` | oude namen (`ltm`/`stm`) | expliciet v1 |
-| `/v2/...` | nieuwe namen (`remote`/`stable`/`recent`) | nieuwe clients |
+- **`remote_*`** — de long-term score (voorheen `ltm_score`): `remote_score`, `avg_remote_score`.
+- **`stable_*`** — de short-term score (voorheen `stm_score`): `stable_score`, `avg_stable_score`.
+- **`recent_*`** — recente score: `recent_score` (smallint, default 0), `avg_recent_score` (numeric, nullable).
+- **`core_*`** — het kaarttype "core" (`is_core`) en de daarvan afgeleide tellingen: `core_cards_practiced`, `core_correct_first_try`, `total_core_cards`, `total_core_count`, `core_practiced_today`, `core_correct_first_try_today`.
 
-Beide versies werken op **dezelfde data**; de database houdt oude en nieuwe kolommen synchroon. Nieuwe clients gebruiken `/v2`.
+> `ltm` was vroeger twee dingen tegelijk — een **score** én een **kaarttype**. De score heet nu `remote`, het type `core`.
 
-**Veldnaam-mapping (v1 → v2):**
+**`recent` is optioneel bij writes:**
+- `recent_score` bij `POST /review/progress`: **weggelaten = waarde blijft onveranderd**.
+- `avg_recent_score` in `deck_delta`/`daily_snapshot` bij `POST /stats/update`: weggelaten = bestaande waarde blijft staan.
 
-| v1 | v2 |
-|---|---|
-| `ltm_score` | `remote_score` |
-| `stm_score` | `stable_score` |
-| `ltm_cards_practiced` | `remote_cards_practiced` |
-| `ltm_correct_first_try` | `remote_correct_first_try` |
-| `avg_ltm_score` | `avg_remote_score` |
-| `avg_stm_score` | `avg_stable_score` |
-| `total_ltm_cards` | `total_remote_cards` |
-| `total_ltm_count` | `total_remote_count` |
-| — | `recent_score` *(nieuw, alleen v2)* |
-| — | `avg_recent_score` *(nieuw, alleen v2)* |
+**Paden:** alle endpoints zitten onder het prefix `/v2` (bijv. `/v2/review/due`). De paden in dit document staan voor de leesbaarheid zonder dat prefix; zet er in de praktijk `/v2` voor. Ongeprefixte paden bestaan niet meer.
 
-**Alleen in v2 — `recent`:**
-- `recent_score` (smallint, default 0) op het voortgangsobject. Optioneel bij `POST /v2/review/progress`; **weggelaten = waarde blijft onveranderd** (een v1-write reset `recent_score` dus ook niet).
-- `avg_recent_score` (numeric, nullable) in `deck_delta`/`daily_snapshot` bij `POST /v2/stats/update` en in de stats-responses. Weggelaten = bestaande waarde blijft staan.
-- v2-responses van `/review/due`, `/review/deck/:id`, `/review/progress`, `/sync/changes`, `/stats/*` en de summaries bevatten de recent-velden; v1-responses **niet**.
+**WebSocket:** de payloads van `/ws`-events (`progress_saved`, `core_set`, `progress_deleted`) bevatten het voortgangsobject met de veldnamen hierboven.
 
-**Endpoint-alias:** `GET /review/ltm/summary` heet in v2 `GET /v2/review/remote/summary` (respons: `total_remote_count`, `due_count`, `avg_remote_score`, `avg_stable_score`, `avg_recent_score`). Het oude pad blijft onder alle prefixen werken.
+---
 
-**`GET /version`** (zonder auth) meldt de beschikbare versies en de ondergrens:
-```json
-{ "versions": ["v1", "v2"], "latest": "v2", "min": "v1" }
+## Minimale clientversie
+
+De server bewaakt een minimaal vereist **Flutter buildNumber** (het getal na de `+` in `version: x.y.z+build`). Dit minimum staat in de database (`app_config.min_client_build`) en wordt door de beheerder met SQL bijgesteld.
+
+**De client moet bij élk verzoek zijn buildNumber meesturen in de header:**
+```
+X-Client-Build: 42
 ```
 
-**Afsluiten van oude versies:** de server kan geconfigureerd worden met een minimumversie (`MIN_API_VERSION`). Calls naar een versie onder die grens — inclusief de ongeprefixte legacy-paden — krijgen dan op élk endpoint:
+- Is de meegestuurde build **lager** dan het minimum (of ontbreekt de header — telt als `0`), dan weigert de server het verzoek met **`426 Upgrade Required`**:
+  ```json
+  { "error": "client_version_unsupported", "min_client_build": 42 }
+  ```
+- Bij minimum `0` (de standaard) wordt niets geblokkeerd.
 
+**`GET /version`** (zonder auth, nooit geblokkeerd) meldt het actuele minimum, zodat de client bij het opstarten kan checken of hij nog mag draaien en anders een update-melding toont:
 ```json
-HTTP 410 Gone
-{ "error": "api_version_unsupported", "min_version": "v2" }
+{ "versions": ["v2"], "latest": "v2", "min": "v2", "min_client_build": 42 }
 ```
 
-`GET /version` blijft altijd bereikbaar (en toont dan alleen nog de ondersteunde versies); clients horen bij het opstarten te checken of hun versie in `versions` staat en anders een update-melding te tonen.
-
-**WebSocket:** de payloads van `/ws`-events (`progress_saved`, `core_set`, `progress_deleted`) bevatten **beide** naamsets (oud én nieuw, incl. `recent_score`). Clients moeten onbekende velden negeren en hun eigen naamset uitlezen.
-
-> De rest van dit document beschrijft de endpoints met **v1-veldnamen**. Voor `/v2` geldt overal de bovenstaande naamtabel; verder zijn paden, statuscodes en semantiek identiek.
+> De client hoort bij opstart `GET /version` te raadplegen en bij `eigen buildNumber < min_client_build` niet verder te draaien. De `426` op de API-calls is het vangnet voor clients die dat niet doen.
 
 ---
 
@@ -432,8 +423,8 @@ Kaarten die nu herhaald moeten worden (`due_date <= nu`), gesorteerd op oudste d
     "created_at": "...",
     "updated_at": "...",
     "progress_id": "uuid",           // id van het voortgangsrecord
-    "ltm_score": 2,
-    "stm_score": 3,
+    "remote_score": 2,
+    "stable_score": 3,
     "due_date": "2024-01-01",
     "repetitions": "...",
     "is_core": true,
@@ -471,8 +462,8 @@ Alle kaarten in een deck, inclusief voortgangsdata. Kaarten zonder voortgang heb
     "created_at": "...",
     "updated_at": "...",
     "progress_id": "uuid",           // null als nog nooit geoefend
-    "ltm_score": 2,                  // null als nog nooit geoefend
-    "stm_score": 3,                  // null als nog nooit geoefend
+    "remote_score": 2,                  // null als nog nooit geoefend
+    "stable_score": 3,                  // null als nog nooit geoefend
     "due_date": "...",               // null als nog nooit geoefend
     "repetitions": "...",          // null als nog nooit geoefend
     "is_core": false,           // null als nog nooit geoefend
@@ -490,8 +481,9 @@ Sla de voortgang op na het beantwoorden van een kaart. Ondersteunt twee modi:
 ```json
 {
   "card_id": "uuid",                        // verplicht
-  "ltm_score": 2,                           // verplicht — long term memory score
-  "stm_score": 3,                           // optioneel, standaard 0 — short term memory score
+  "remote_score": 2,                        // verplicht — long-term (remote) score
+  "stable_score": 3,                        // optioneel, standaard 0 — short-term (stable) score
+  "recent_score": 1,                        // optioneel — weggelaten = bestaande waarde blijft staan
   "due_date": "2024-02-01",                 // verplicht — YYYY-MM-DD
   "repetitions": "...",                     // optioneel, standaard "" — intern formaat, backend slaat op en geeft terug zonder te interpreteren
   "is_core": true,                          // optioneel — als weggelaten blijft de bestaande waarde behouden (eerste keer: false)
@@ -518,8 +510,8 @@ Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie
   "id": "uuid",
   "user_id": "uuid",
   "card_id": "uuid",
-  "ltm_score": 2,
-  "stm_score": 3,
+  "remote_score": 2,
+  "stable_score": 3,
   "due_date": "2024-02-01",
   "repetitions": "...",
   "is_core": true,
@@ -553,22 +545,23 @@ Idempotent: ook als er geen (actief) voortgangsrecord was, is de response `200`.
 - `403` — kaart is niet van deze gebruiker
 - `404` — kaart bestaat niet
 
-**Sync naar andere apparaten:** het voortgangsrecord krijgt `deleted_at` gezet en verschijnt daarmee in `/sync/changes`. Clients moeten een progress-record met `deleted_at != null` behandelen als "verwijder het lokale voortgangsrecord van deze kaart". **Let op:** de overige velden van zo'n record (`ltm_score`, `due_date`, `repetitions`, …) bevatten nog de oude waarden van vóór de reset — die dus niet toepassen. Daarnaast wordt realtime het WebSocket-event `progress_deleted` gebroadcast.
+**Sync naar andere apparaten:** het voortgangsrecord krijgt `deleted_at` gezet en verschijnt daarmee in `/sync/changes`. Clients moeten een progress-record met `deleted_at != null` behandelen als "verwijder het lokale voortgangsrecord van deze kaart". **Let op:** de overige velden van zo'n record (`remote_score`, `due_date`, `repetitions`, …) bevatten nog de oude waarden van vóór de reset — die dus niet toepassen. Daarnaast wordt realtime het WebSocket-event `progress_deleted` gebroadcast.
 
 Een nieuwe review van dezelfde kaart (POST `/review/progress`) maakt het record weer actief (`deleted_at` wordt `null`); de server behoudt daarbij de bestaande `is_core`-waarde van het record, tenzij `is_core` expliciet wordt meegestuurd.
 
 ---
 
-### GET `/review/ltm/summary`
-Overzicht van alle LTM-kaarten van de gebruiker (over alle decks).
+### GET `/review/core/summary`
+Overzicht van alle core-kaarten (`is_core = true`) van de gebruiker (over alle decks).
 
 **Response `200`:**
 ```json
 {
-  "total_ltm_count": "14",   // totaal aantal LTM-kaarten
-  "due_count": "3",          // LTM-kaarten met due_date <= nu
-  "avg_ltm_score": "2.71",   // gemiddelde ltm_score (null als geen LTM-kaarten)
-  "avg_stm_score": "1.50"    // gemiddelde stm_score (null als geen LTM-kaarten)
+  "total_core_count": "14",     // totaal aantal core-kaarten
+  "due_count": "3",             // core-kaarten met due_date <= nu
+  "avg_remote_score": "2.71",   // gemiddelde remote_score (null als geen core-kaarten)
+  "avg_stable_score": "1.50",   // gemiddelde stable_score (null als geen core-kaarten)
+  "avg_recent_score": "1.20"    // gemiddelde recent_score (null als geen core-kaarten)
 }
 ```
 
@@ -587,8 +580,8 @@ Overzicht van alle decks met het aantal due kaarten en nieuwe kaarten. Handig vo
     "due_count": "5",          // kaarten met due_date <= nu
     "new_count": "12",         // kaarten die nog nooit zijn beantwoord (repetitions leeg of geen record)
     "total_count": "20",       // totaal aantal kaarten in het deck
-    "avg_ltm_score": "2.71",   // gemiddelde ltm_score van geoefende kaarten (null als geen)
-    "avg_stm_score": "1.50",   // gemiddelde stm_score van geoefende kaarten (null als geen)
+    "avg_remote_score": "2.71",   // gemiddelde remote_score van geoefende kaarten (null als geen)
+    "avg_stable_score": "1.50",   // gemiddelde stable_score van geoefende kaarten (null als geen)
     "created_at": "2024-01-01T00:00:00.000Z", // aanmaakdatum van het deck
     "last_reviewed_at": "2026-05-20"          // datum van de meest recente review-sessie (null als nooit)
   }
@@ -638,8 +631,8 @@ Geeft alle decks, kaarten en voortgangsrecords terug die gewijzigd zijn na `sinc
       "id": "uuid",
       "user_id": "uuid",
       "card_id": "uuid",
-      "ltm_score": 2,
-      "stm_score": 3,
+      "remote_score": 2,
+      "stable_score": 3,
       "due_date": "...",
       "repetitions": "...",
       "is_core": true,
@@ -675,10 +668,10 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
   "deck_delta": {             // verplicht — counters (0 of 1) + huidige gemiddelde scores van dit deck
     "cards_practiced": 1,
     "cards_correct_first_try": 1,
-    "ltm_cards_practiced": 0,
-    "ltm_correct_first_try": 0,
-    "avg_ltm_score": 3.40,    // actuele gemiddelde ltm_score van dit deck (overschrijft)
-    "avg_stm_score": 1.80     // actuele gemiddelde stm_score van dit deck (overschrijft)
+    "core_cards_practiced": 0,
+    "core_correct_first_try": 0,
+    "avg_remote_score": 3.40,    // actuele gemiddelde remote_score van dit deck (overschrijft)
+    "avg_stable_score": 1.80     // actuele gemiddelde stable_score van dit deck (overschrijft)
   },
 
   "daily_delta": {            // verplicht — delta voor de dagelijkse user-totalen (0 of 1 per veld)
@@ -690,9 +683,9 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
 
   "daily_snapshot": {         // verplicht — absolute waarden (overschrijven bestaande waarden)
     "total_cards": 42,        // optioneel — weglaten als onveranderd (bijv. bij reviews)
-    "total_ltm_cards": 18,    // optioneel — weglaten als onveranderd
-    "avg_ltm_score": 3.40,
-    "avg_stm_score": 1.80
+    "total_core_cards": 18,    // optioneel — weglaten als onveranderd
+    "avg_remote_score": 3.40,
+    "avg_stable_score": 1.80
   }
 }
 ```
@@ -707,10 +700,10 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
     "date": "2026-05-14",
     "cards_practiced": 5,
     "cards_correct_first_try": 3,
-    "ltm_cards_practiced": 2,
-    "ltm_correct_first_try": 1,
-    "avg_ltm_score": "3.40",
-    "avg_stm_score": "1.80",
+    "core_cards_practiced": 2,
+    "core_correct_first_try": 1,
+    "avg_remote_score": "3.40",
+    "avg_stable_score": "1.80",
     "updated_at": "2026-05-14T14:32:00.000Z"
   },
   "daily_snapshot": {
@@ -718,13 +711,13 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
     "user_id": "uuid",
     "date": "2026-05-14",
     "total_cards": 42,
-    "total_ltm_cards": 18,
+    "total_core_cards": 18,
     "cards_practiced_today": 5,
     "correct_first_try_today": 3,
     "core_practiced_today": 2,
     "core_correct_first_try_today": 1,
-    "avg_ltm_score": "3.40",
-    "avg_stm_score": "1.80",
+    "avg_remote_score": "3.40",
+    "avg_stable_score": "1.80",
     "updated_at": "2026-05-14T14:32:00.000Z"
   }
 }
@@ -749,10 +742,10 @@ Alle dagelijkse statistieken voor één deck, gesorteerd van nieuw naar oud.
     "date": "2026-05-14",
     "cards_practiced": 5,
     "cards_correct_first_try": 3,
-    "ltm_cards_practiced": 2,
-    "ltm_correct_first_try": 1,
-    "avg_ltm_score": "3.40",
-    "avg_stm_score": "1.80",
+    "core_cards_practiced": 2,
+    "core_correct_first_try": 1,
+    "avg_remote_score": "3.40",
+    "avg_stable_score": "1.80",
     "updated_at": "2026-05-14T14:32:00.000Z"
   }
 ]
@@ -771,13 +764,13 @@ Alle dagelijkse snapshots van de gebruiker, gesorteerd van nieuw naar oud. Gebru
     "user_id": "uuid",
     "date": "2026-05-14",
     "total_cards": 42,
-    "total_ltm_cards": 18,
+    "total_core_cards": 18,
     "cards_practiced_today": 5,
     "correct_first_try_today": 3,
     "core_practiced_today": 2,
     "core_correct_first_try_today": 1,
-    "avg_ltm_score": "3.40",
-    "avg_stm_score": "1.80",
+    "avg_remote_score": "3.40",
+    "avg_stable_score": "1.80",
     "updated_at": "2026-05-14T14:32:00.000Z"
   }
 ]
@@ -842,6 +835,7 @@ Alle berichten zijn JSON:
 | `403` | Geen toegang (resource van andere gebruiker) |
 | `404` | Resource niet gevonden |
 | `409` | Conflict — server heeft een nieuwere versie (`stale_write`) |
+| `426` | Clientversie te oud (`client_version_unsupported`) — update vereist |
 | `429` | Te veel verzoeken (rate limit) |
 | `500` | Serverfout |
 

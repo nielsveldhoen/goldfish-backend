@@ -260,7 +260,7 @@ async function main() {
     await pool.query(
       `INSERT INTO deck_stats
          (user_id, deck_id, date, cards_practiced, cards_correct_first_try,
-          ltm_cards_practiced, ltm_correct_first_try, avg_ltm_score, avg_stm_score)
+          core_cards_practiced, core_correct_first_try, avg_remote_score, avg_stable_score)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        ON CONFLICT (user_id, deck_id, date) DO NOTHING`,
       [ds.user_id, ds.deck_id, ds.date, ds.cards_practiced, ds.cards_correct_first_try,
@@ -281,9 +281,9 @@ async function main() {
 
     await pool.query(
       `INSERT INTO user_daily_snapshot
-         (user_id, date, total_cards, total_ltm_cards, cards_practiced_today,
+         (user_id, date, total_cards, total_core_cards, cards_practiced_today,
           correct_first_try_today, core_practiced_today, core_correct_first_try_today,
-          avg_ltm_score, avg_stm_score)
+          avg_remote_score, avg_stable_score)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        ON CONFLICT (user_id, date) DO NOTHING`,
       [dm.user_id, dm.date, totals.total, totals.totalLtm, dm.cards_practiced,
