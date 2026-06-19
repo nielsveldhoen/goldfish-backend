@@ -11,6 +11,7 @@ sudo -u postgres psql -d goldfish -f 003_rename_ltm_remote_stm_stable_add_recent
 sudo -u postgres psql -d goldfish -f 004_rename_remote_core_type_columns.sql
 sudo -u postgres psql -d goldfish -f 005_drop_legacy_ltm_stm.sql
 sudo -u postgres psql -d goldfish -f 006_app_config_min_client_build.sql
+sudo -u postgres psql -d goldfish -f 007_add_core_avg_scores.sql
 ```
 
 | Bestand | Wat | Herhaalbaar? |
@@ -21,6 +22,7 @@ sudo -u postgres psql -d goldfish -f 006_app_config_min_client_build.sql
 | `004_rename_remote_core_type_columns.sql` | corrigeert de type-tellingen die in 003 abusievelijk `remote_*` heetten naar `core_*` (`core_cards_practiced`, `core_correct_first_try`, `total_core_cards`); werkt sync-triggers bij | ja, idempotent (RENAMEs met `IF EXISTS`-guards) |
 | `005_drop_legacy_ltm_stm.sql` | verwijdert de oude `ltm_*`/`stm_*`-kolommen + sync-triggers/functies; nog maar één naamset. **Pas draaien als geen enkele client meer op de oude namen draait** | ja, idempotent (`DROP … IF EXISTS`) |
 | `006_app_config_min_client_build.sql` | `app_config` key-value-tabel + seed `min_client_build = 0` (minimaal vereist Flutter buildNumber; server weigert te oude clients met 426) | ja, idempotent |
+| `007_add_core_avg_scores.sql` | voegt `avg_core_remote_score`/`avg_core_stable_score`/`avg_core_recent_score` toe aan `deck_stats` en `user_daily_snapshot` (gemiddelden over alleen core-kaarten) | ja, idempotent (`ADD COLUMN IF NOT EXISTS`) |
 
 **Minimale clientversie bijstellen** (geen migratie — gewoon DML):
 ```sql

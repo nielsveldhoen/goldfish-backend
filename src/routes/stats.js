@@ -23,6 +23,9 @@ router.post("/update", authMiddleware, async (req, res) => {
     avg_remote_score: deck_avg_remote = null,
     avg_stable_score: deck_avg_stable = null,
     avg_recent_score: deck_avg_recent = null,
+    avg_core_remote_score: deck_avg_core_remote = null,
+    avg_core_stable_score: deck_avg_core_stable = null,
+    avg_core_recent_score: deck_avg_core_recent = null,
   } = deck_delta;
 
   const {
@@ -38,6 +41,9 @@ router.post("/update", authMiddleware, async (req, res) => {
     avg_remote_score = null,
     avg_stable_score = null,
     avg_recent_score = null,
+    avg_core_remote_score = null,
+    avg_core_stable_score = null,
+    avg_core_recent_score = null,
   } = daily_snapshot;
 
   try {
@@ -52,8 +58,10 @@ router.post("/update", authMiddleware, async (req, res) => {
 
     const deckStatsResult = await pool.query(
       `INSERT INTO deck_stats
-         (user_id, deck_id, date, cards_practiced, cards_correct_first_try, core_cards_practiced, core_correct_first_try, avg_remote_score, avg_stable_score, avg_recent_score)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         (user_id, deck_id, date, cards_practiced, cards_correct_first_try, core_cards_practiced, core_correct_first_try,
+          avg_remote_score, avg_stable_score, avg_recent_score,
+          avg_core_remote_score, avg_core_stable_score, avg_core_recent_score)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT (user_id, deck_id, date) DO UPDATE SET
          cards_practiced          = deck_stats.cards_practiced          + EXCLUDED.cards_practiced,
          cards_correct_first_try  = deck_stats.cards_correct_first_try  + EXCLUDED.cards_correct_first_try,
@@ -62,16 +70,23 @@ router.post("/update", authMiddleware, async (req, res) => {
          avg_remote_score         = EXCLUDED.avg_remote_score,
          avg_stable_score         = EXCLUDED.avg_stable_score,
          avg_recent_score         = COALESCE(EXCLUDED.avg_recent_score, deck_stats.avg_recent_score),
+         avg_core_remote_score    = COALESCE(EXCLUDED.avg_core_remote_score, deck_stats.avg_core_remote_score),
+         avg_core_stable_score    = COALESCE(EXCLUDED.avg_core_stable_score, deck_stats.avg_core_stable_score),
+         avg_core_recent_score    = COALESCE(EXCLUDED.avg_core_recent_score, deck_stats.avg_core_recent_score),
          updated_at               = NOW()
        RETURNING *`,
-      [req.user.id, deck_id, date, cards_practiced, cards_correct_first_try, core_cards_practiced, core_correct_first_try, deck_avg_remote, deck_avg_stable, deck_avg_recent]
+      [req.user.id, deck_id, date, cards_practiced, cards_correct_first_try, core_cards_practiced, core_correct_first_try,
+       deck_avg_remote, deck_avg_stable, deck_avg_recent,
+       deck_avg_core_remote, deck_avg_core_stable, deck_avg_core_recent]
     );
 
     const snapshotResult = await pool.query(
       `INSERT INTO user_daily_snapshot
          (user_id, date, total_cards, total_core_cards, cards_practiced_today, correct_first_try_today,
-          core_practiced_today, core_correct_first_try_today, avg_remote_score, avg_stable_score, avg_recent_score)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          core_practiced_today, core_correct_first_try_today,
+          avg_remote_score, avg_stable_score, avg_recent_score,
+          avg_core_remote_score, avg_core_stable_score, avg_core_recent_score)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (user_id, date) DO UPDATE SET
          total_cards                 = COALESCE(EXCLUDED.total_cards,      user_daily_snapshot.total_cards),
          total_core_cards            = COALESCE(EXCLUDED.total_core_cards, user_daily_snapshot.total_core_cards),
@@ -82,10 +97,15 @@ router.post("/update", authMiddleware, async (req, res) => {
          avg_remote_score            = EXCLUDED.avg_remote_score,
          avg_stable_score            = EXCLUDED.avg_stable_score,
          avg_recent_score            = COALESCE(EXCLUDED.avg_recent_score, user_daily_snapshot.avg_recent_score),
+         avg_core_remote_score       = COALESCE(EXCLUDED.avg_core_remote_score, user_daily_snapshot.avg_core_remote_score),
+         avg_core_stable_score       = COALESCE(EXCLUDED.avg_core_stable_score, user_daily_snapshot.avg_core_stable_score),
+         avg_core_recent_score       = COALESCE(EXCLUDED.avg_core_recent_score, user_daily_snapshot.avg_core_recent_score),
          updated_at                  = NOW()
        RETURNING *`,
       [req.user.id, date, total_cards, total_core_cards, cards_practiced_today, correct_first_try_today,
-       core_practiced_today, core_correct_first_try_today, avg_remote_score, avg_stable_score, avg_recent_score]
+       core_practiced_today, core_correct_first_try_today,
+       avg_remote_score, avg_stable_score, avg_recent_score,
+       avg_core_remote_score, avg_core_stable_score, avg_core_recent_score]
     );
 
     res.json({

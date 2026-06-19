@@ -20,13 +20,13 @@ De backend kent één naamset:
 - **`remote_*`** — de long-term score (voorheen `ltm_score`): `remote_score`, `avg_remote_score`.
 - **`stable_*`** — de short-term score (voorheen `stm_score`): `stable_score`, `avg_stable_score`.
 - **`recent_*`** — recente score: `recent_score` (smallint, default 0), `avg_recent_score` (numeric, nullable).
-- **`core_*`** — het kaarttype "core" (`is_core`) en de daarvan afgeleide tellingen: `core_cards_practiced`, `core_correct_first_try`, `total_core_cards`, `total_core_count`, `core_practiced_today`, `core_correct_first_try_today`.
+- **`core_*`** — het kaarttype "core" (`is_core`) en de daarvan afgeleide tellingen + gemiddelden: `core_cards_practiced`, `core_correct_first_try`, `total_core_cards`, `total_core_count`, `core_practiced_today`, `core_correct_first_try_today`, en de gemiddelde scores over alléén core-kaarten: `avg_core_remote_score`, `avg_core_stable_score`, `avg_core_recent_score` (numeric, nullable).
 
 > `ltm` was vroeger twee dingen tegelijk — een **score** én een **kaarttype**. De score heet nu `remote`, het type `core`.
 
 **`recent` is optioneel bij writes:**
 - `recent_score` bij `POST /review/progress`: **weggelaten = waarde blijft onveranderd**.
-- `avg_recent_score` in `deck_delta`/`daily_snapshot` bij `POST /stats/update`: weggelaten = bestaande waarde blijft staan.
+- `avg_recent_score` en `avg_core_remote_score`/`avg_core_stable_score`/`avg_core_recent_score` in `deck_delta`/`daily_snapshot` bij `POST /stats/update`: weggelaten = bestaande waarde blijft staan. (`avg_remote_score`/`avg_stable_score` overschrijven daarentegen altijd, ook met `null`.)
 
 **Paden:** alle endpoints zitten onder het prefix `/v2` (bijv. `/v2/review/due`). De paden in dit document staan voor de leesbaarheid zonder dat prefix; zet er in de praktijk `/v2` voor. Ongeprefixte paden bestaan niet meer.
 
@@ -670,8 +670,12 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
     "cards_correct_first_try": 1,
     "core_cards_practiced": 0,
     "core_correct_first_try": 0,
-    "avg_remote_score": 3.40,    // actuele gemiddelde remote_score van dit deck (overschrijft)
-    "avg_stable_score": 1.80     // actuele gemiddelde stable_score van dit deck (overschrijft)
+    "avg_remote_score": 3.40,        // actuele gemiddelde remote_score over alle kaarten (overschrijft)
+    "avg_stable_score": 1.80,        // actuele gemiddelde stable_score over alle kaarten (overschrijft)
+    "avg_recent_score": 2.10,        // optioneel — gemiddelde recent_score over alle kaarten (weglaten = onveranderd)
+    "avg_core_remote_score": 3.80,   // optioneel — gemiddelde remote_score over alleen core-kaarten
+    "avg_core_stable_score": 2.40,   // optioneel — gemiddelde stable_score over alleen core-kaarten
+    "avg_core_recent_score": 2.90    // optioneel — gemiddelde recent_score over alleen core-kaarten
   },
 
   "daily_delta": {            // verplicht — delta voor de dagelijkse user-totalen (0 of 1 per veld)
@@ -684,8 +688,12 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
   "daily_snapshot": {         // verplicht — absolute waarden (overschrijven bestaande waarden)
     "total_cards": 42,        // optioneel — weglaten als onveranderd (bijv. bij reviews)
     "total_core_cards": 18,    // optioneel — weglaten als onveranderd
-    "avg_remote_score": 3.40,
-    "avg_stable_score": 1.80
+    "avg_remote_score": 3.40,        // gemiddelde remote_score over alle kaarten (overschrijft)
+    "avg_stable_score": 1.80,        // gemiddelde stable_score over alle kaarten (overschrijft)
+    "avg_recent_score": 2.10,        // optioneel — gemiddelde recent_score over alle kaarten (weglaten = onveranderd)
+    "avg_core_remote_score": 3.80,   // optioneel — gemiddelde remote_score over alleen core-kaarten
+    "avg_core_stable_score": 2.40,   // optioneel — gemiddelde stable_score over alleen core-kaarten
+    "avg_core_recent_score": 2.90    // optioneel — gemiddelde recent_score over alleen core-kaarten
   }
 }
 ```
@@ -704,6 +712,10 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
     "core_correct_first_try": 1,
     "avg_remote_score": "3.40",
     "avg_stable_score": "1.80",
+    "avg_recent_score": "2.10",
+    "avg_core_remote_score": "3.80",
+    "avg_core_stable_score": "2.40",
+    "avg_core_recent_score": "2.90",
     "updated_at": "2026-05-14T14:32:00.000Z"
   },
   "daily_snapshot": {
@@ -718,6 +730,10 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
     "core_correct_first_try_today": 1,
     "avg_remote_score": "3.40",
     "avg_stable_score": "1.80",
+    "avg_recent_score": "2.10",
+    "avg_core_remote_score": "3.80",
+    "avg_core_stable_score": "2.40",
+    "avg_core_recent_score": "2.90",
     "updated_at": "2026-05-14T14:32:00.000Z"
   }
 }
@@ -746,6 +762,10 @@ Alle dagelijkse statistieken voor één deck, gesorteerd van nieuw naar oud.
     "core_correct_first_try": 1,
     "avg_remote_score": "3.40",
     "avg_stable_score": "1.80",
+    "avg_recent_score": "2.10",
+    "avg_core_remote_score": "3.80",
+    "avg_core_stable_score": "2.40",
+    "avg_core_recent_score": "2.90",
     "updated_at": "2026-05-14T14:32:00.000Z"
   }
 ]
@@ -771,6 +791,10 @@ Alle dagelijkse snapshots van de gebruiker, gesorteerd van nieuw naar oud. Gebru
     "core_correct_first_try_today": 1,
     "avg_remote_score": "3.40",
     "avg_stable_score": "1.80",
+    "avg_recent_score": "2.10",
+    "avg_core_remote_score": "3.80",
+    "avg_core_stable_score": "2.40",
+    "avg_core_recent_score": "2.90",
     "updated_at": "2026-05-14T14:32:00.000Z"
   }
 ]
