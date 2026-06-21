@@ -273,6 +273,8 @@ Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie
 ### DELETE `/decks/:id`
 Soft-delete: zet `deleted_at` op de huidige tijd. Het deck verschijnt niet meer in normale GET-responses, maar wel in `/sync/changes`.
 
+**Cascade:** de voortgangsrecords van alle kaarten in dit deck worden mee-gesoftdelete (`deleted_at` gezet). Ze verschijnen daarmee in `/sync/changes` met `deleted_at != null` — behandel ze als "verwijder het lokale voortgangsrecord" (zoals bij een progress-reset). Hierdoor tellen kaarten in een verwijderd deck ook niet meer mee in de core-stats (`/review/core/summary`).
+
 **Response `200`:**
 ```json
 { "message": "Deck deleted" }
@@ -389,6 +391,8 @@ Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie
 ### DELETE `/cards/:id`
 Soft-delete: zet `deleted_at` op de huidige tijd. De kaart verschijnt niet meer in normale GET-responses, maar wel in `/sync/changes`.
 
+**Cascade:** het voortgangsrecord van deze kaart wordt mee-gesoftdelete (`deleted_at` gezet). Het verschijnt daarmee in `/sync/changes` met `deleted_at != null` — behandel het als "verwijder het lokale voortgangsrecord" (zoals bij een progress-reset). Hierdoor telt een verwijderde kaart ook niet meer mee in de core-stats (`/review/core/summary`).
+
 **Response `200`:**
 ```json
 { "message": "Card deleted" }
@@ -425,6 +429,7 @@ Kaarten die nu herhaald moeten worden (`due_date <= nu`), gesorteerd op oudste d
     "progress_id": "uuid",           // id van het voortgangsrecord
     "remote_score": 2,
     "stable_score": 3,
+    "recent_score": 1,               // null als nog geen voortgang
     "due_date": "2024-01-01",
     "repetitions": "...",
     "is_core": true,
@@ -464,6 +469,7 @@ Alle kaarten in een deck, inclusief voortgangsdata. Kaarten zonder voortgang heb
     "progress_id": "uuid",           // null als nog nooit geoefend
     "remote_score": 2,                  // null als nog nooit geoefend
     "stable_score": 3,                  // null als nog nooit geoefend
+    "recent_score": 1,                  // null als nog nooit geoefend
     "due_date": "...",               // null als nog nooit geoefend
     "repetitions": "...",          // null als nog nooit geoefend
     "is_core": false,           // null als nog nooit geoefend
@@ -471,6 +477,32 @@ Alle kaarten in een deck, inclusief voortgangsdata. Kaarten zonder voortgang heb
   }
 ]
 ```
+
+---
+
+### GET `/review/deck/:deck_id/scores` 🔒
+Lichte score-index van alle kaarten in één deck — alleen de scores en types per kaart, zonder kaart-tekst. Bedoeld om deck-gemiddelden exact te berekenen zonder de volledige kaartdata te laden. Read-only, niet gepagineerd, gesorteerd op `card_id`.
+
+Bevat ook nog-nieuwe kaarten (`is_new = true`); voor die kaarten zijn de scores `null`.
+
+**Response `200`:** array van score-objecten — één per kaart
+```json
+[
+  {
+    "card_id": "uuid",
+    "deck_id": "uuid",
+    "is_core": true,        // type-aanduiding (false als nog geen voortgangsrecord)
+    "is_new": false,        // true = geen actief voortgangsrecord OF lege repetitions
+    "remote_score": 2,      // null wanneer is_new = true
+    "stable_score": 3,      // null wanneer is_new = true
+    "recent_score": 1       // null wanneer is_new = true
+  }
+]
+```
+
+**Foutcodes:**
+- `403` — het deck is niet van deze gebruiker
+- `404` — het deck bestaat niet (of is verwijderd)
 
 ---
 
@@ -567,6 +599,69 @@ Overzicht van alle core-kaarten (`is_core = true`) van de gebruiker (over alle d
 
 ---
 
+### GET `/review/core/scores` 🔒
+Lichte score-index van alle core-kaarten (`is_core = true`) van de gebruiker, over alle decks. Zelfde vorm als `/review/deck/:deck_id/scores`. Bedoeld om het core-gemiddelde exact te berekenen zonder de volledige kaartdata te laden. Read-only, niet gepagineerd, gesorteerd op `card_id`.
+
+Bevat ook core-kaarten die nog nieuw zijn (`is_new = true`); voor die kaarten zijn de scores `null`.
+
+**Response `200`:** array van score-objecten — één per core-kaart
+```json
+[
+  {
+    "card_id": "uuid",
+    "deck_id": "uuid",
+    "is_core": true,        // altijd true in deze response
+    "is_new": false,        // true = lege repetitions (nog nooit beantwoord)
+    "remote_score": 2,      // null wanneer is_new = true
+    "stable_score": 3,      // null wanneer is_new = true
+    "recent_score": 1       // null wanneer is_new = true
+  }
+]
+```
+
+---
+
+### GET `/review/core` 🔒
+Incrementele core-delta: de core-kaarten van de gebruiker (over alle decks) waarvan de voortgang is **gewijzigd sinds `since`**. Zelfde stijl als `/sync/changes` — niet de volledige lijst, alleen het verschil — en bedoeld om de core-set in de client incrementeel bij te werken. Read-only, niet gepagineerd.
+
+**Query params:**
+- `since` (optioneel) — ISO 8601 timestamp. Alleen records met `progress.updated_at > since` worden teruggegeven. Leeg of weggelaten = epoch, dus de eerste sync geeft alle huidige core-kaarten terug.
+
+Er wordt **niet hard op `is_core` gefilterd**: per kaart komt de actuele `is_core` mee. `is_core = true` → kaart toevoegen aan / bijwerken in de core-set; `is_core = false` → kaart is geen core meer en mag uit de core-set verwijderd worden.
+
+De kaart-objecten hebben exact dezelfde veldnamen als `/review/due` en `/review/deck/:deck_id` (dezelfde `FlashCard.fromJson`).
+
+**Response `200`:** object met `cards` (delta) + `server_time` (volgend watermerk)
+```json
+{
+  "cards": [
+    {
+      "id": "uuid",
+      "deck_id": "uuid",
+      "question": "...",
+      "answer": "...",
+      "created_at": "...",
+      "updated_at": "...",
+      "progress_id": "uuid",
+      "remote_score": 2,
+      "stable_score": 3,
+      "recent_score": 1,
+      "due_date": "2024-01-01",
+      "repetitions": "...",
+      "is_core": true,                  // true = in core-set, false = uit core-set
+      "progress_updated_at": "..."
+    }
+  ],
+  "server_time": "2026-05-09T12:00:00.000Z"
+}
+```
+Geen wijzigingen sinds `since` → `"cards": []` met status `200`, plus de actuele `server_time`. De client stuurt `server_time` mee als `since` bij de volgende call. Filter en `server_time` gebruiken dezelfde tijdsbron (DB-klok), zodat er geen wijzigingen tussen twee calls in wegvallen.
+
+**Foutcodes:**
+- `400` — `since` meegegeven maar geen geldige ISO 8601
+
+---
+
 ### GET `/review/decks/summary`
 Overzicht van alle decks met het aantal due kaarten en nieuwe kaarten. Handig voor het dashboard.
 
@@ -580,6 +675,8 @@ Overzicht van alle decks met het aantal due kaarten en nieuwe kaarten. Handig vo
     "due_count": "5",          // kaarten met due_date <= nu
     "new_count": "12",         // kaarten die nog nooit zijn beantwoord (repetitions leeg of geen record)
     "total_count": "20",       // totaal aantal kaarten in het deck
+    "core_count": "3",         // totaal aantal core-kaarten in het deck (incl. nieuwe)
+    "core_new_count": "1",     // core-kaarten die nog nieuw zijn (nooit beantwoord)
     "avg_remote_score": "2.71",   // gemiddelde remote_score van geoefende kaarten (null als geen)
     "avg_stable_score": "1.50",   // gemiddelde stable_score van geoefende kaarten (null als geen)
     "created_at": "2024-01-01T00:00:00.000Z", // aanmaakdatum van het deck

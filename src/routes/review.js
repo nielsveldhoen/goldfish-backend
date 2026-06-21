@@ -130,6 +130,65 @@ router.get("/deck/:deck_id", authMiddleware, async (req, res) => {
 
 
 // ========================
+// GET DECK SCORES (lichte score-index per kaart van één deck)
+// ========================
+router.get("/deck/:deck_id/scores", authMiddleware, async (req, res) => {
+  const { deck_id } = req.params;
+
+  if (!isUUID(deck_id)) {
+    return res.status(404).json({ error: "Deck not found" });
+  }
+
+  try {
+    const deckCheck = await pool.query(
+      `SELECT user_id FROM decks WHERE id = $1 AND deleted_at IS NULL`,
+      [deck_id]
+    );
+
+    if (deckCheck.rowCount === 0) {
+      return res.status(404).json({ error: "Deck not found" });
+    }
+
+    if (deckCheck.rows[0].user_id !== req.user.id) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+
+    const result = await pool.query(
+      `SELECT
+         c.id AS card_id,
+         c.deck_id,
+         COALESCE(ucp.is_core, false) AS is_core,
+         (ucp.id IS NULL OR ucp.repetitions IS NULL OR ucp.repetitions = '') AS is_new,
+         CASE WHEN ucp.id IS NULL OR ucp.repetitions IS NULL OR ucp.repetitions = ''
+              THEN NULL ELSE ucp.remote_score END AS remote_score,
+         CASE WHEN ucp.id IS NULL OR ucp.repetitions IS NULL OR ucp.repetitions = ''
+              THEN NULL ELSE ucp.stable_score END AS stable_score,
+         CASE WHEN ucp.id IS NULL OR ucp.repetitions IS NULL OR ucp.repetitions = ''
+              THEN NULL ELSE ucp.recent_score END AS recent_score
+       FROM cards c
+       JOIN decks d ON c.deck_id = d.id
+       LEFT JOIN user_card_progress ucp
+         ON c.id = ucp.card_id
+         AND ucp.user_id = $1
+         AND ucp.deleted_at IS NULL
+       WHERE c.deck_id = $2
+         AND d.user_id = $1
+         AND c.deleted_at IS NULL
+         AND d.deleted_at IS NULL
+       ORDER BY c.id ASC`,
+      [req.user.id, deck_id]
+    );
+
+    res.json(result.rows);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+// ========================
 // UPSERT PROGRESS (frontend bepaalt alles)
 // ========================
 router.post("/progress", authMiddleware, async (req, res) => {
@@ -286,6 +345,16 @@ router.get("/decks/summary", authMiddleware, async (req, res) => {
         ) AS new_count,
 
         COUNT(c.id) AS total_count,
+
+        COUNT(c.id) FILTER (
+          WHERE ucp.is_core = true
+        ) AS core_count,
+
+        COUNT(c.id) FILTER (
+          WHERE ucp.is_core = true
+            AND (ucp.repetitions IS NULL OR ucp.repetitions = '')
+        ) AS core_new_count,
+
         ROUND(AVG(ucp.remote_score)::numeric, 2) AS avg_remote_score,
         ROUND(AVG(ucp.stable_score)::numeric, 2) AS avg_stable_score,
         ROUND(AVG(ucp.recent_score)::numeric, 2) AS avg_recent_score,
@@ -342,6 +411,96 @@ router.get("/core/summary", authMiddleware, async (req, res) => {
     );
 
     res.json(result.rows[0]);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ========================
+// GET CORE CHANGES (incrementele core-delta sinds `since`)
+// ========================
+// Geeft de core-kaarten terug waarvan de voortgang is gewijzigd sinds `since`.
+// Stijl van /sync/changes: alleen de delta + server_time als volgend watermerk.
+// We filteren op ucp.updated_at > since (niet hard op is_core) en geven de
+// actuele is_core per kaart mee: true = toevoegen/bijwerken in core-set,
+// false = uit core-set verwijderen. `since` leeg/weg → epoch (eerste sync).
+router.get("/core", authMiddleware, async (req, res) => {
+  const { since } = req.query;
+
+  let sinceDate;
+  if (since === undefined || since === "") {
+    sinceDate = new Date(0);
+  } else {
+    sinceDate = new Date(since);
+    if (isNaN(sinceDate.getTime())) {
+      return res.status(400).json({ error: "Invalid since format — use ISO 8601" });
+    }
+  }
+
+  try {
+    const [serverTimeResult, cardsResult] = await Promise.all([
+      pool.query(`SELECT NOW() AS now`),
+      pool.query(
+        `SELECT c.id, c.deck_id, c.question, c.answer, c.created_at, c.updated_at,
+                ucp.id AS progress_id, ucp.remote_score, ucp.stable_score, ucp.recent_score,
+                ucp.due_date, ucp.repetitions, ucp.is_core, ucp.updated_at AS progress_updated_at
+         FROM cards c
+         JOIN user_card_progress ucp ON c.id = ucp.card_id
+         JOIN decks d ON c.deck_id = d.id
+         WHERE ucp.user_id = $1
+           AND ucp.updated_at > $2
+           AND ucp.deleted_at IS NULL
+           AND c.deleted_at IS NULL
+           AND d.deleted_at IS NULL
+         ORDER BY ucp.updated_at ASC`,
+        [req.user.id, sinceDate]
+      ),
+    ]);
+
+    res.json({
+      cards: cardsResult.rows,
+      server_time: serverTimeResult.rows[0].now,
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ========================
+// GET CORE SCORES (lichte score-index van alle core-kaarten)
+// ========================
+// Alle core-kaarten (is_core = true) van de gebruiker, over alle decks.
+router.get("/core/scores", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT
+         c.id AS card_id,
+         c.deck_id,
+         ucp.is_core AS is_core,
+         (ucp.repetitions IS NULL OR ucp.repetitions = '') AS is_new,
+         CASE WHEN ucp.repetitions IS NULL OR ucp.repetitions = ''
+              THEN NULL ELSE ucp.remote_score END AS remote_score,
+         CASE WHEN ucp.repetitions IS NULL OR ucp.repetitions = ''
+              THEN NULL ELSE ucp.stable_score END AS stable_score,
+         CASE WHEN ucp.repetitions IS NULL OR ucp.repetitions = ''
+              THEN NULL ELSE ucp.recent_score END AS recent_score
+       FROM user_card_progress ucp
+       JOIN cards c ON c.id = ucp.card_id
+       JOIN decks d ON c.deck_id = d.id
+       WHERE ucp.user_id = $1
+         AND ucp.is_core = true
+         AND ucp.deleted_at IS NULL
+         AND c.deleted_at IS NULL
+         AND d.deleted_at IS NULL
+       ORDER BY c.id ASC`,
+      [req.user.id]
+    );
+
+    res.json(result.rows);
 
   } catch (err) {
     console.error(err);

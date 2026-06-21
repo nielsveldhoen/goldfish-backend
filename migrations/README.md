@@ -12,6 +12,7 @@ sudo -u postgres psql -d goldfish -f 004_rename_remote_core_type_columns.sql
 sudo -u postgres psql -d goldfish -f 005_drop_legacy_ltm_stm.sql
 sudo -u postgres psql -d goldfish -f 006_app_config_min_client_build.sql
 sudo -u postgres psql -d goldfish -f 007_add_core_avg_scores.sql
+sudo -u postgres psql -d goldfish -f 008_cleanup_orphan_progress.sql
 ```
 
 | Bestand | Wat | Herhaalbaar? |
@@ -23,6 +24,7 @@ sudo -u postgres psql -d goldfish -f 007_add_core_avg_scores.sql
 | `005_drop_legacy_ltm_stm.sql` | verwijdert de oude `ltm_*`/`stm_*`-kolommen + sync-triggers/functies; nog maar één naamset. **Pas draaien als geen enkele client meer op de oude namen draait** | ja, idempotent (`DROP … IF EXISTS`) |
 | `006_app_config_min_client_build.sql` | `app_config` key-value-tabel + seed `min_client_build = 0` (minimaal vereist Flutter buildNumber; server weigert te oude clients met 426) | ja, idempotent |
 | `007_add_core_avg_scores.sql` | voegt `avg_core_remote_score`/`avg_core_stable_score`/`avg_core_recent_score` toe aan `deck_stats` en `user_daily_snapshot` (gemiddelden over alleen core-kaarten) | ja, idempotent (`ADD COLUMN IF NOT EXISTS`) |
+| `008_cleanup_orphan_progress.sql` | softdeletet bestaande wees-`user_card_progress`-records waarvan de card of het deck al soft-deleted is (maakt core-telling consistent; cascade-fix in de DELETE-handlers voorkomt nieuwe) | ja, idempotent (al gesoftdelete records vallen buiten de `WHERE`) |
 
 **Minimale clientversie bijstellen** (geen migratie — gewoon DML):
 ```sql

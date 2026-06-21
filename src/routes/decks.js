@@ -146,8 +146,11 @@ router.put("/:id", authMiddleware, async (req, res) => {
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
 
+  const client = await pool.connect();
   try {
-    const result = await pool.query(
+    await client.query("BEGIN");
+
+    const result = await client.query(
       `UPDATE decks SET deleted_at = NOW()
        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
        RETURNING id`,
@@ -155,15 +158,31 @@ router.delete("/:id", authMiddleware, async (req, res) => {
     );
 
     if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Deck not found" });
     }
+
+    // Cascade: voortgangsrecords van alle kaarten in dit deck mee-softdeleten,
+    // zodat ze niet als wees-records (met is_core = true) in de core-stats
+    // blijven hangen.
+    await client.query(
+      `UPDATE user_card_progress SET deleted_at = NOW()
+       WHERE deleted_at IS NULL
+         AND card_id IN (SELECT id FROM cards WHERE deck_id = $1)`,
+      [id]
+    );
+
+    await client.query("COMMIT");
 
     broadcast(req.user.id, "deck_deleted", { id });
     res.json({ message: "Deck deleted" });
 
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error(err);
     res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
   }
 });
 

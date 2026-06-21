@@ -226,8 +226,11 @@ router.put("/:id", authMiddleware, async (req, res) => {
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
 
+  const client = await pool.connect();
   try {
-    const result = await pool.query(
+    await client.query("BEGIN");
+
+    const result = await client.query(
       `UPDATE cards c SET deleted_at = NOW()
        FROM decks d
        WHERE c.id = $1
@@ -239,16 +242,30 @@ router.delete("/:id", authMiddleware, async (req, res) => {
     );
 
     if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Card not found" });
     }
+
+    // Cascade: voortgangsrecords van deze kaart mee-softdeleten zodat ze niet
+    // als wees-records (met is_core = true) in de core-stats blijven hangen.
+    await client.query(
+      `UPDATE user_card_progress SET deleted_at = NOW()
+       WHERE card_id = $1 AND deleted_at IS NULL`,
+      [id]
+    );
+
+    await client.query("COMMIT");
 
     const { deck_id } = result.rows[0];
     broadcast(req.user.id, "card_deleted", { id, deck_id });
     res.json({ message: "Card deleted" });
 
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error(err);
     res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
   }
 });
 
