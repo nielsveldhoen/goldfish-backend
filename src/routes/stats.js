@@ -121,6 +121,60 @@ router.post("/update", authMiddleware, async (req, res) => {
 
 
 // ========================
+// GET STATS CHANGES (incrementele stats-delta sinds `since`)
+// ========================
+// Aparte delta-cursor voor deck_stats + user_daily_snapshot, in de stijl van
+// GET /review/core: filter op updated_at > since (strikt >), server_time =
+// DB NOW() bij query-start als volgend watermerk. `since` leeg/weg → epoch
+// (eerste sync → volledige historie).
+//
+// Alleen levende rijen — soft-delete bestaat hier niet. De client leidt
+// verwijderde stats zelf af uit de los-gesyncte deck-deletes en ruimt lokale
+// orphans op. Loopt bewust NIET mee op /sync/changes.
+router.get("/changes", authMiddleware, async (req, res) => {
+  const { since } = req.query;
+
+  let sinceDate;
+  if (since === undefined || since === "") {
+    sinceDate = new Date(0);
+  } else {
+    sinceDate = new Date(since);
+    if (isNaN(sinceDate.getTime())) {
+      return res.status(400).json({ error: "Invalid since format — use ISO 8601" });
+    }
+  }
+
+  try {
+    const [serverTimeResult, deckStatsResult, snapshotsResult] = await Promise.all([
+      pool.query(`SELECT NOW() AS now`),
+      pool.query(
+        `SELECT * FROM deck_stats
+         WHERE user_id = $1 AND updated_at > $2
+         ORDER BY updated_at ASC`,
+        [req.user.id, sinceDate]
+      ),
+      pool.query(
+        `SELECT * FROM user_daily_snapshot
+         WHERE user_id = $1 AND updated_at > $2
+         ORDER BY updated_at ASC`,
+        [req.user.id, sinceDate]
+      ),
+    ]);
+
+    res.json({
+      deck_stats: deckStatsResult.rows,
+      daily_snapshots: snapshotsResult.rows,
+      server_time: serverTimeResult.rows[0].now,
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+// ========================
 // GET DECK STATS
 // ========================
 router.get("/deck/:deckId", authMiddleware, async (req, res) => {

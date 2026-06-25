@@ -842,6 +842,68 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
 
 ---
 
+### GET `/stats/changes` 🔒
+Incrementele stats-delta: alle `deck_stats`- en `user_daily_snapshot`-rijen van de gebruiker die **gewijzigd zijn sinds `since`**. Zelfde stijl als `/review/core` en `/sync/changes` — niet de volledige lijst, alleen het verschil — bedoeld om de stats op andere apparaten incrementeel bij te werken. **Aparte cursor**, los van `/sync/changes`. Read-only, niet gepagineerd.
+
+Alleen levende rijen worden teruggegeven; er is **geen soft-delete**. Een `deck_stats`-rij verdwijnt alleen als het deck verdwijnt, en deck-deletes lopen al via `/sync/changes` — de client ruimt de bijbehorende lokale stats-orphans zelf op.
+
+**Query params:**
+- `since` (optioneel) — ISO 8601 timestamp. Alleen rijen met `updated_at > since` (strikt `>`) worden teruggegeven. Leeg of weggelaten = epoch, dus de eerste sync geeft de volledige historie terug.
+
+De rij-objecten hebben exact dezelfde veldnamen als `/stats/deck/:deckId` (`deck_stats`) en `/stats/daily` (`daily_snapshots`). De `avg_core_*`-velden zijn `null` als er geen core-kaarten geoefend zijn (niet `0`). `date` is `YYYY-MM-DD`.
+
+**Response `200`:** object met `deck_stats` + `daily_snapshots` (delta) + `server_time` (volgend watermerk)
+```json
+{
+  "deck_stats": [
+    {
+      "id": "uuid",
+      "user_id": "uuid",
+      "deck_id": "uuid",
+      "date": "2026-06-25",
+      "cards_practiced": 5,
+      "cards_correct_first_try": 3,
+      "core_cards_practiced": 2,
+      "core_correct_first_try": 1,
+      "avg_remote_score": "3.40",
+      "avg_stable_score": "1.80",
+      "avg_recent_score": "2.10",
+      "avg_core_remote_score": null,
+      "avg_core_stable_score": null,
+      "avg_core_recent_score": null,
+      "updated_at": "2026-06-25T10:00:00.000Z"
+    }
+  ],
+  "daily_snapshots": [
+    {
+      "id": "uuid",
+      "user_id": "uuid",
+      "date": "2026-06-25",
+      "total_cards": 42,
+      "total_core_cards": 18,
+      "cards_practiced_today": 5,
+      "correct_first_try_today": 3,
+      "core_practiced_today": 2,
+      "core_correct_first_try_today": 1,
+      "avg_remote_score": "3.40",
+      "avg_stable_score": "1.80",
+      "avg_recent_score": "2.10",
+      "avg_core_remote_score": null,
+      "avg_core_stable_score": null,
+      "avg_core_recent_score": null,
+      "updated_at": "2026-06-25T10:00:00.000Z"
+    }
+  ],
+  "server_time": "2026-06-25T10:00:01.000Z"
+}
+```
+Geen wijzigingen sinds `since` → `"deck_stats": []` en `"daily_snapshots": []` met status `200`, plus de actuele `server_time`. De client stuurt `server_time` mee als `since` bij de volgende call. Filter en `server_time` gebruiken dezelfde tijdsbron (DB-klok); `updated_at` wordt server-side bij elke wijziging bijgewerkt, dus de client-klok is nooit de bron van het watermerk.
+
+**Foutcodes:**
+- `400` — `since` meegegeven maar geen geldige ISO 8601
+
+---
+
 ### GET `/stats/deck/:deckId`
 Alle dagelijkse statistieken voor één deck, gesorteerd van nieuw naar oud.
 

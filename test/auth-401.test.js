@@ -30,6 +30,7 @@ const PROTECTED_ENDPOINTS = [
   ["get", "/review/core/summary"],
   ["get", "/sync/changes?since=2026-01-01T00:00:00.000Z"],
   ["post", "/stats/update"],
+  ["get", "/stats/changes?since=2026-01-01T00:00:00.000Z"],
   ["get", `/stats/deck/${FAKE_UUID}`],
   ["get", "/stats/daily"],
 ];
