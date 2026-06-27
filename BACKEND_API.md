@@ -657,6 +657,14 @@ De kaart-objecten hebben exact dezelfde veldnamen als `/review/due` en `/review/
 ```
 Geen wijzigingen sinds `since` → `"cards": []` met status `200`, plus de actuele `server_time`. De client stuurt `server_time` mee als `since` bij de volgende call. Filter en `server_time` gebruiken dezelfde tijdsbron (DB-klok), zodat er geen wijzigingen tussen twee calls in wegvallen.
 
+**Full-resync-signaal:** net als `/sync/changes` heeft dit endpoint een resync-horizon (`SYNC_RESYNC_HORIZON_DAYS`, default 75 d). `/review/core` signaleert core-verwijderingen via `is_core = false`-flips; is `since` ouder dan de horizon — of ontbreekt/leeg (epoch, dus eerste sync) — dan kan zo'n flip al gepurged zijn. De server geeft dan **geen delta** maar:
+
+```json
+{ "full_resync": true, "server_time": "2026-05-09T12:00:00.000Z" }
+```
+
+De client moet dan zijn lokale core-set wegdoen en die volledig opnieuw opbouwen (bijv. via `/review/core/scores`), en `server_time` als nieuwe `since` bewaren. Een normale delta-response bevat het veld `full_resync` **niet**.
+
 **Foutcodes:**
 - `400` — `since` meegegeven maar geen geldige ISO 8601
 
@@ -693,7 +701,15 @@ Overzicht van alle decks met het aantal due kaarten en nieuwe kaarten. Handig vo
 Geeft alle decks, kaarten en voortgangsrecords terug die gewijzigd zijn na `since`. Inclusief soft-deleted items (zodat de client lokaal kan verwijderen). Gefilterd op de ingelogde gebruiker.
 
 **Query params:**
-- `since` (verplicht) — ISO 8601 timestamp, bijv. `2026-05-01T00:00:00.000Z`
+- `since` (optioneel) — ISO 8601 timestamp, bijv. `2026-05-01T00:00:00.000Z`
+
+**Full-resync-signaal:** soft-deleted rijen (tombstones) worden server-side maar een beperkte tijd bewaard (`TOMBSTONE_RETENTION_DAYS`, default 90 d) en daarna hard verwijderd. Is `since` ouder dan de resync-horizon (`SYNC_RESYNC_HORIZON_DAYS`, default 75 d) — of ontbreekt/leeg, zoals bij een nieuwe installatie — dan kunnen er in dat venster al deletes gepurged zijn die de client nooit gezien heeft. De server geeft dan **geen delta** maar:
+
+```json
+{ "full_resync": true, "server_time": "2026-05-09T12:00:00.000Z" }
+```
+
+De client moet in dat geval zijn lokale state wegdoen en een **volledige** load doen (alle decks/kaarten/voortgang opnieuw ophalen), en `server_time` als nieuwe `since`-cursor bewaren. `server_time` komt uit de DB-klok, gelijk aan de normale response. Een delta-response (zie hieronder) bevat het veld `full_resync` **niet**.
 
 **Response `200`:**
 ```json
@@ -743,7 +759,7 @@ Geeft alle decks, kaarten en voortgangsrecords terug die gewijzigd zijn na `sinc
 > **Progress-resets:** een progress-record met `deleted_at != null` betekent dat de voortgang van die kaart gereset is (via DELETE `/review/progress/:card_id`, mogelijk op een ander apparaat). Verwijder dan het lokale voortgangsrecord; de kaart telt weer als nieuw.
 
 **Foutcodes:**
-- `400` — `since` ontbreekt of ongeldig formaat
+- `400` — `since` meegegeven maar geen geldig ISO 8601-formaat
 
 ---
 

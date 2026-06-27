@@ -14,6 +14,7 @@ sudo -u postgres psql -d goldfish -f 006_app_config_min_client_build.sql
 sudo -u postgres psql -d goldfish -f 007_add_core_avg_scores.sql
 sudo -u postgres psql -d goldfish -f 008_cleanup_orphan_progress.sql
 sudo -u postgres psql -d goldfish -f 009_stats_updated_at_watermark.sql
+sudo -u postgres psql -d goldfish -f 010_tombstone_purge_indexes.sql
 ```
 
 | Bestand | Wat | Herhaalbaar? |
@@ -27,6 +28,7 @@ sudo -u postgres psql -d goldfish -f 009_stats_updated_at_watermark.sql
 | `007_add_core_avg_scores.sql` | voegt `avg_core_remote_score`/`avg_core_stable_score`/`avg_core_recent_score` toe aan `deck_stats` en `user_daily_snapshot` (gemiddelden over alleen core-kaarten) | ja, idempotent (`ADD COLUMN IF NOT EXISTS`) |
 | `008_cleanup_orphan_progress.sql` | softdeletet bestaande wees-`user_card_progress`-records waarvan de card of het deck al soft-deleted is (maakt core-telling consistent; cascade-fix in de DELETE-handlers voorkomt nieuwe) | ja, idempotent (al gesoftdelete records vallen buiten de `WHERE`) |
 | `009_stats_updated_at_watermark.sql` | server-side `updated_at`-watermark voor `GET /stats/changes`: `set_updated_at()`-trigger op `deck_stats` + `user_daily_snapshot` (bumpt `updated_at` bij elke UPDATE) + index `(user_id, updated_at)` op beide. Reverse: `009_stats_updated_at_watermark_down.sql` | ja, idempotent (`IF NOT EXISTS` / `CREATE OR REPLACE` / `DROP … IF EXISTS` + `CREATE`) |
+| `010_tombstone_purge_indexes.sql` | partial indexen `(deleted_at) WHERE deleted_at IS NOT NULL` op `user_card_progress`, `cards`, `decks` voor de dagelijkse tombstone-purge (`src/jobs/purgeTombstones.js`, hard-delete van soft-deletes ouder dan `TOMBSTONE_RETENTION_DAYS`) | ja, idempotent (`CREATE INDEX IF NOT EXISTS`) |
 
 **Minimale clientversie bijstellen** (geen migratie — gewoon DML):
 ```sql

@@ -1,4 +1,5 @@
 import "./config/env.js";
+import "./config/retention.js"; // valideert de retentie/horizon-invariant bij opstart
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";

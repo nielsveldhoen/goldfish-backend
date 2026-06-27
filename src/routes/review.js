@@ -2,6 +2,7 @@ import express from "express";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { broadcast } from "../ws.js";
+import { SYNC_RESYNC_HORIZON_DAYS } from "../config/retention.js";
 
 const router = express.Router();
 
@@ -436,6 +437,22 @@ router.get("/core", authMiddleware, async (req, res) => {
     sinceDate = new Date(since);
     if (isNaN(sinceDate.getTime())) {
       return res.status(400).json({ error: "Invalid since format — use ISO 8601" });
+    }
+  }
+
+  // Full-resync-guard (defensief, zelfde reden als /sync/changes): /review/core
+  // signaleert core-verwijderingen via is_core=false-flips. Is `since` ouder dan
+  // de horizon — of leeg/epoch (nieuwe installatie) — dan kan zo'n flip al
+  // gepurged zijn en mist de client hem. Geef dan een full-resync-signaal i.p.v.
+  // een delta. server_time uit dezelfde DB-klokbron.
+  const horizon = new Date(Date.now() - SYNC_RESYNC_HORIZON_DAYS * 864e5);
+  if (sinceDate < horizon) {
+    try {
+      const { rows } = await pool.query(`SELECT NOW() AS now`);
+      return res.status(200).json({ full_resync: true, server_time: rows[0].now });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: "Server error" });
     }
   }
 
