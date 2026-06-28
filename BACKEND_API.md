@@ -191,6 +191,7 @@ Alle decks van de ingelogde gebruiker, gesorteerd op aanmaakdatum (nieuwste eers
     "title": "Frans vocabulaire",
     "description": "Basiswoorden Frans",
     "is_public": false,
+    "inactive": false,
     "tags": ["frans", "vocabulaire"],
     "created_at": "2024-01-01T00:00:00.000Z",
     "updated_at": "2024-01-02T00:00:00.000Z",
@@ -198,6 +199,8 @@ Alle decks van de ingelogde gebruiker, gesorteerd op aanmaakdatum (nieuwste eers
   }
 ]
 ```
+
+> **`inactive`** (boolean, standaard `false`): een deck dat is "gearchiveerd". De client verbergt inactieve decks en sluit hun gewone kaarten uit van de due/new-weergave. **Uitzondering:** de core-kaarten van een inactief deck blijven gewoon meetellen en trainen — `/review/core` en `/review/core/summary` filteren bewust **niet** op `inactive`.
 
 ---
 
@@ -219,6 +222,7 @@ Nieuw deck aanmaken.
   "title": "Frans vocabulaire",       // verplicht
   "description": "Basiswoorden",      // optioneel
   "is_public": false,                 // optioneel, standaard false
+  "inactive": false,                  // optioneel, standaard false
   "tags": ["frans", "school"]         // optioneel, standaard []
 }
 ```
@@ -231,6 +235,7 @@ Nieuw deck aanmaken.
   "title": "Frans vocabulaire",
   "description": "Basiswoorden",
   "is_public": false,
+  "inactive": false,
   "tags": ["frans", "school"],
   "created_at": "2024-01-01T00:00:00.000Z",
   "updated_at": "2024-01-01T00:00:00.000Z",
@@ -252,10 +257,13 @@ Deck bijwerken. Alleen meegestuurde velden worden bijgewerkt — niet-meegestuur
   "title": "Nieuwe titel",
   "description": "Nieuwe omschrijving",
   "is_public": true,
+  "inactive": true,
   "tags": ["nieuw", "tag"],
   "client_updated_at": "2024-01-01T00:00:00.000Z"   // optioneel — ISO timestamp van de lokaal bekende versie
 }
 ```
+
+`inactive` (boolean) wordt — net als `title`/`tags` — alleen bijgewerkt als het is meegestuurd; ontbreekt het, dan blijft de huidige waarde staan. De `409`-`current` bevat het volledige deck-object, inclusief `inactive`.
 
 Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie, wordt `409` teruggegeven.
 
@@ -680,6 +688,7 @@ Overzicht van alle decks met het aantal due kaarten en nieuwe kaarten. Handig vo
     "id": "uuid",
     "title": "Frans vocabulaire",
     "tags": ["Frans", "vocabulaire"],
+    "inactive": false,         // gearchiveerd? client verbergt dan het deck (core-kaarten tellen wél door)
     "due_count": "5",          // kaarten met due_date <= nu
     "new_count": "12",         // kaarten die nog nooit zijn beantwoord (repetitions leeg of geen record)
     "total_count": "20",       // totaal aantal kaarten in het deck
@@ -722,6 +731,7 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
       "title": "Frans vocabulaire",
       "description": "...",
       "is_public": false,
+      "inactive": false,
       "tags": ["frans"],
       "created_at": "...",
       "updated_at": "...",

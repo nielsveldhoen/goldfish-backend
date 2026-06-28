@@ -57,7 +57,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
 // CREATE DECK
 // ========================
 router.post("/", authMiddleware, async (req, res) => {
-  const { title, description, is_public, tags } = req.body;
+  const { title, description, is_public, tags, inactive } = req.body;
 
   if (!title) {
     return res.status(400).json({ error: "Title is required" });
@@ -65,15 +65,16 @@ router.post("/", authMiddleware, async (req, res) => {
 
   try {
     const result = await pool.query(
-      `INSERT INTO decks (user_id, title, description, is_public, tags)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO decks (user_id, title, description, is_public, tags, inactive)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING *`,
       [
         req.user.id,
         title,
         description || null,
         is_public ?? false,
-        tags ?? []
+        tags ?? [],
+        inactive ?? false
       ]
     );
 
@@ -93,7 +94,7 @@ router.post("/", authMiddleware, async (req, res) => {
 // ========================
 router.put("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
-  const { title, description, is_public, tags, client_updated_at } = req.body;
+  const { title, description, is_public, tags, inactive, client_updated_at } = req.body;
 
   try {
     const current = await pool.query(
@@ -116,14 +117,16 @@ router.put("/:id", authMiddleware, async (req, res) => {
        SET title = $1,
            description = $2,
            is_public = $3,
-           tags = $4
-       WHERE id = $5 AND user_id = $6
+           tags = $4,
+           inactive = $5
+       WHERE id = $6 AND user_id = $7
        RETURNING *`,
       [
         title ?? deck.title,
         description !== undefined ? description : deck.description,
         is_public ?? deck.is_public,
         tags !== undefined ? tags : deck.tags,
+        inactive !== undefined ? inactive : deck.inactive,
         id,
         req.user.id
       ]

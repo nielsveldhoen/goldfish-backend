@@ -335,6 +335,7 @@ router.get("/decks/summary", authMiddleware, async (req, res) => {
         d.id,
         d.title,
         d.tags,
+        d.inactive,
         d.created_at,
 
         COUNT(ucp.card_id) FILTER (
