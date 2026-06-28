@@ -40,9 +40,39 @@ router.get("/changes", authMiddleware, async (req, res) => {
     const [serverTimeResult, decksResult, cardsResult, progressResult] = await Promise.all([
       pool.query(`SELECT NOW() AS now`),
       pool.query(
-        `SELECT * FROM decks
-         WHERE user_id = $1 AND updated_at > $2
-         ORDER BY updated_at ASC`,
+        `SELECT d.*,
+           (SELECT COUNT(*) FROM cards c
+              JOIN user_card_progress ucp
+                ON ucp.card_id = c.id
+               AND ucp.user_id = $1
+               AND ucp.deleted_at IS NULL
+             WHERE c.deck_id = d.id
+               AND c.deleted_at IS NULL
+               AND ucp.is_core = true
+           ) AS core_total_count,
+           (SELECT COUNT(*) FROM cards c
+              JOIN user_card_progress ucp
+                ON ucp.card_id = c.id
+               AND ucp.user_id = $1
+               AND ucp.deleted_at IS NULL
+             WHERE c.deck_id = d.id
+               AND c.deleted_at IS NULL
+               AND ucp.is_core = true
+               AND ucp.due_date <= CURRENT_DATE
+           ) AS core_due_count,
+           (SELECT COUNT(*) FROM cards c
+              JOIN user_card_progress ucp
+                ON ucp.card_id = c.id
+               AND ucp.user_id = $1
+               AND ucp.deleted_at IS NULL
+             WHERE c.deck_id = d.id
+               AND c.deleted_at IS NULL
+               AND ucp.is_core = true
+               AND (ucp.repetitions IS NULL OR ucp.repetitions = '')
+           ) AS core_new_count
+         FROM decks d
+         WHERE d.user_id = $1 AND d.updated_at > $2
+         ORDER BY d.updated_at ASC`,
         [req.user.id, sinceDate]
       ),
       pool.query(

@@ -350,7 +350,12 @@ router.get("/decks/summary", authMiddleware, async (req, res) => {
 
         COUNT(c.id) FILTER (
           WHERE ucp.is_core = true
-        ) AS core_count,
+        ) AS core_total_count,
+
+        COUNT(ucp.card_id) FILTER (
+          WHERE ucp.is_core = true
+            AND ucp.due_date <= CURRENT_DATE
+        ) AS core_due_count,
 
         COUNT(c.id) FILTER (
           WHERE ucp.is_core = true

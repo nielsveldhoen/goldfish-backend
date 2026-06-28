@@ -692,7 +692,8 @@ Overzicht van alle decks met het aantal due kaarten en nieuwe kaarten. Handig vo
     "due_count": "5",          // kaarten met due_date <= nu
     "new_count": "12",         // kaarten die nog nooit zijn beantwoord (repetitions leeg of geen record)
     "total_count": "20",       // totaal aantal kaarten in het deck
-    "core_count": "3",         // totaal aantal core-kaarten in het deck (incl. nieuwe)
+    "core_total_count": "3",   // totaal aantal core-kaarten in het deck (is_core = true, incl. nieuwe)
+    "core_due_count": "1",     // core-kaarten met due_date <= vandaag (al beoordeeld)
     "core_new_count": "1",     // core-kaarten die nog nieuw zijn (nooit beantwoord)
     "avg_remote_score": "2.71",   // gemiddelde remote_score van geoefende kaarten (null als geen)
     "avg_stable_score": "1.50",   // gemiddelde stable_score van geoefende kaarten (null als geen)
@@ -735,7 +736,10 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
       "tags": ["frans"],
       "created_at": "...",
       "updated_at": "...",
-      "deleted_at": null
+      "deleted_at": null,
+      "core_total_count": "3",   // totaal aantal core-kaarten in het deck (is_core = true)
+      "core_due_count": "1",     // core-kaarten met due_date <= vandaag
+      "core_new_count": "1"      // core-kaarten die nog nooit beoordeeld zijn
     }
   ],
   "cards": [
