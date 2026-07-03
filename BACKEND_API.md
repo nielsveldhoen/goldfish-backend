@@ -293,6 +293,34 @@ Soft-delete: zet `deleted_at` op de huidige tijd. Het deck verschijnt niet meer 
 
 ---
 
+### POST `/decks/bulk-delete`
+Meerdere decks tegelijk soft-deleten (max **100** ids per request), in één transactie. Per deck exact dezelfde semantiek als `DELETE /decks/:id`, inclusief de cascade: de voortgangsrecords van alle kaarten in elk verwijderd deck worden mee-gesoftdelete, zodat ze via `/sync/changes` en de core-stats correct verdwijnen.
+
+**Idempotent en tolerant:** ids die niet bestaan, al soft-deleted zijn of van een andere gebruiker zijn worden **stilzwijgend genegeerd** (zelfde stijl als het `ids`-filter van `GET /stats/decks`). Er komt géén `404` voor individuele ids — bij een `200` mag de client de hele batch als geslaagd behandelen. Een tweede call met dezelfde ids geeft gewoon `200` met `"deleted": 0`.
+
+**Request body:**
+```json
+{
+  "deck_ids": ["uuid", "uuid"]
+}
+```
+
+**Response `200`:**
+```json
+{
+  "deleted": 2,
+  "ids": ["uuid", "uuid"]
+}
+```
+`ids` bevat de ids die daadwerkelijk verwijderd zijn (genegeerde ids ontbreken).
+
+**Realtime:** per daadwerkelijk verwijderd deck wordt een `deck_deleted`-event gebroadcast met `{ "id": "uuid" }`, identiek aan `DELETE /decks/:id`. Genegeerde ids krijgen geen event.
+
+**Foutcodes:**
+- `400` — `deck_ids` ontbreekt, is leeg, of bevat meer dan 100 ids
+
+---
+
 ## Kaarten (`/cards`) 🔒
 
 Alle card-endpoints vereisen authenticatie. Toegang is beperkt tot kaarten in decks van de ingelogde gebruiker.
@@ -337,9 +365,12 @@ Nieuwe kaart aanmaken.
 {
   "deck_id": "uuid",            // verplicht
   "question": "Wat is appel?",  // verplicht
-  "answer": "pomme"             // verplicht
+  "answer": "pomme",            // verplicht
+  "created_at": "2026-01-15T09:30:00.000Z"  // optioneel — ISO timestamp, voor offline aangemaakte kaarten
 }
 ```
+
+> **`created_at`** (optioneel): de aanmaaktijd volgens de client, bedoeld voor kaarten die offline zijn aangemaakt en later gesynct worden. Ontbreekt het veld of is de waarde geen geldige timestamp, dan gebruikt de server de DB-klok.
 
 **Response `201`:** kaart-object
 
@@ -350,7 +381,7 @@ Nieuwe kaart aanmaken.
 ---
 
 ### POST `/cards/bulk`
-Meerdere kaarten tegelijk aanmaken in één deck. Alle kaarten worden in een transactie ingevoegd — als één mislukt worden geen kaarten aangemaakt.
+Meerdere kaarten tegelijk aanmaken in één deck (max **500** per request). Alle kaarten worden in een transactie ingevoegd — als één mislukt worden geen kaarten aangemaakt.
 
 **Request body:**
 ```json
@@ -358,15 +389,19 @@ Meerdere kaarten tegelijk aanmaken in één deck. Alle kaarten worden in een tra
   "deck_id": "uuid",
   "cards": [
     { "question": "Wat is appel?", "answer": "pomme" },
-    { "question": "Wat is peer?",  "answer": "poire"  }
+    { "question": "Wat is peer?",  "answer": "poire", "created_at": "2026-01-15T09:30:00.000Z" }
   ]
 }
 ```
 
-**Response `201`:** array van aangemaakte kaart-objecten
+Per kaart is `created_at` optioneel, met exact dezelfde semantiek als bij `POST /cards`: geldige ISO-timestamp → overgenomen, ontbrekend of ongeldig → DB-klok.
+
+**Response `201`:** array van aangemaakte kaart-objecten.
+
+> **Volgorde-garantie (hard contract):** de response-array heeft altijd exact dezelfde volgorde als de `cards`-array in de request. De client mag dus op index zijn lokale temp-ids aan de server-ids koppelen.
 
 **Foutcodes:**
-- `400` — ontbrekende velden of lege cards-array
+- `400` — ontbrekende velden, lege cards-array, of meer dan 500 kaarten
 - `403` — deck is niet van deze gebruiker
 
 ---
@@ -408,6 +443,34 @@ Soft-delete: zet `deleted_at` op de huidige tijd. De kaart verschijnt niet meer 
 
 **Foutcodes:**
 - `404` — kaart niet gevonden
+
+---
+
+### POST `/cards/bulk-delete`
+Meerdere kaarten tegelijk soft-deleten (max **500** ids per request), in één transactie. Per kaart exact dezelfde semantiek als `DELETE /cards/:id`, inclusief de cascade: het voortgangsrecord van elke verwijderde kaart wordt mee-gesoftdelete, zodat het via `/sync/changes` en de core-stats correct verdwijnt.
+
+**Idempotent en tolerant:** ids die niet bestaan, al soft-deleted zijn of van een andere gebruiker zijn worden **stilzwijgend genegeerd** (zelfde stijl als het `ids`-filter van `GET /stats/decks`). Er komt géén `404` voor individuele ids — bij een `200` mag de client de hele batch als geslaagd behandelen. Een tweede call met dezelfde ids geeft gewoon `200` met `"deleted": 0`.
+
+**Request body:**
+```json
+{
+  "card_ids": ["uuid", "uuid", "uuid"]
+}
+```
+
+**Response `200`:**
+```json
+{
+  "deleted": 3,
+  "ids": ["uuid", "uuid", "uuid"]
+}
+```
+`ids` bevat de ids die daadwerkelijk verwijderd zijn (genegeerde ids ontbreken).
+
+**Realtime:** per daadwerkelijk verwijderde kaart wordt een `card_deleted`-event gebroadcast met `{ "id": "uuid", "deck_id": "uuid" }`, identiek aan `DELETE /cards/:id`. Genegeerde ids krijgen geen event.
+
+**Foutcodes:**
+- `400` — `card_ids` ontbreekt, is leeg, of bevat meer dan 500 ids
 
 ---
 
@@ -1063,10 +1126,10 @@ Alle berichten zijn JSON:
 |-------------------|--------------------------------------|----------------------------------|
 | `deck_created`    | POST `/decks`                        | volledig deck-object             |
 | `deck_updated`    | PUT `/decks/:id`                     | bijgewerkt deck-object           |
-| `deck_deleted`    | DELETE `/decks/:id`                  | `{ "id": "uuid" }`              |
+| `deck_deleted`    | DELETE `/decks/:id` of POST `/decks/bulk-delete` (per verwijderd deck) | `{ "id": "uuid" }` |
 | `card_created`    | POST `/cards` of POST `/cards/bulk`  | volledig kaart-object            |
 | `card_updated`    | PUT `/cards/:id`                     | bijgewerkt kaart-object          |
-| `card_deleted`    | DELETE `/cards/:id`                  | `{ "id": "uuid", "deck_id": "uuid" }` |
+| `card_deleted`    | DELETE `/cards/:id` of POST `/cards/bulk-delete` (per verwijderde kaart) | `{ "id": "uuid", "deck_id": "uuid" }` |
 | `progress_saved`  | POST `/review/progress` (modus 1)    | voortgangsobject                 |
 | `core_set`        | POST `/review/progress` (modus 2)    | voortgangsobject                 |
 | `progress_deleted`| DELETE `/review/progress/:card_id`   | voortgangsobject (met `deleted_at` gezet) |

@@ -5,6 +5,11 @@ import { broadcast } from "../ws.js";
 
 const router = express.Router();
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Maximale batchgrootte voor /bulk-delete.
+const MAX_BULK_DECKS = 100;
+
 // ========================
 // GET ALL DECKS (van user)
 // ========================
@@ -179,6 +184,72 @@ router.delete("/:id", authMiddleware, async (req, res) => {
 
     broadcast(req.user.id, "deck_deleted", { id });
     res.json({ message: "Deck deleted" });
+
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
+  }
+});
+
+
+// ========================
+// BULK DELETE DECKS
+// ========================
+// Idempotent en tolerant: ids die niet bestaan, al soft-deleted zijn of van
+// een andere gebruiker zijn worden stilzwijgend genegeerd (zelfde stijl als
+// het ids-filter van GET /stats/decks) — de client behandelt de hele batch
+// als geslaagd bij een 200.
+router.post("/bulk-delete", authMiddleware, async (req, res) => {
+  const { deck_ids } = req.body;
+
+  if (!Array.isArray(deck_ids) || deck_ids.length === 0) {
+    return res.status(400).json({ error: "deck_ids is required" });
+  }
+
+  if (deck_ids.length > MAX_BULK_DECKS) {
+    return res.status(400).json({ error: `Too many ids (max ${MAX_BULK_DECKS})` });
+  }
+
+  // Niet-UUID waarden zouden de ::uuid[]-cast laten falen; behandel ze als
+  // onbekende ids en negeer ze dus stilzwijgend.
+  const ids = [...new Set(deck_ids.filter((id) => typeof id === "string" && UUID_RE.test(id)))];
+
+  if (ids.length === 0) {
+    return res.json({ deleted: 0, ids: [] });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const result = await client.query(
+      `UPDATE decks SET deleted_at = NOW()
+       WHERE id = ANY($1::uuid[]) AND user_id = $2 AND deleted_at IS NULL
+       RETURNING id`,
+      [ids, req.user.id]
+    );
+
+    // Cascade: voortgangsrecords van alle kaarten in deze decks
+    // mee-softdeleten, zodat ze niet als wees-records (met is_core = true)
+    // in de core-stats blijven hangen — identiek aan DELETE /decks/:id.
+    if (result.rowCount > 0) {
+      await client.query(
+        `UPDATE user_card_progress SET deleted_at = NOW()
+         WHERE deleted_at IS NULL
+           AND card_id IN (SELECT id FROM cards WHERE deck_id = ANY($1::uuid[]))`,
+        [result.rows.map((r) => r.id)]
+      );
+    }
+
+    await client.query("COMMIT");
+
+    for (const { id } of result.rows) {
+      broadcast(req.user.id, "deck_deleted", { id });
+    }
+    res.json({ deleted: result.rowCount, ids: result.rows.map((r) => r.id) });
 
   } catch (err) {
     await client.query("ROLLBACK");
