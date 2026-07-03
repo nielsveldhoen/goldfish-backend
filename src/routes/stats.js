@@ -175,6 +175,59 @@ router.get("/changes", authMiddleware, async (req, res) => {
 
 
 // ========================
+// GET DECK STATS (batch)
+// ========================
+// Alle deck_stats van de gebruiker in één request, gegroepeerd per deck —
+// vervangt N losse GET /stats/deck/:deckId calls op het dashboard. Optioneel
+// ?ids=<uuid,uuid,...> om te beperken tot specifieke decks; zonder ids alle
+// levende (niet-verwijderde) decks. Elk gevraagd/levend deck krijgt een key,
+// óók zonder stats-rijen (lege array) — zo kan de client "geen stats" van
+// "niet gevraagd" onderscheiden.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.get("/decks", authMiddleware, async (req, res) => {
+  const { ids } = req.query;
+
+  let deckIds = null;
+  if (ids !== undefined && ids !== "") {
+    deckIds = ids.split(",").map((s) => s.trim()).filter(Boolean);
+    if (deckIds.length === 0 || !deckIds.every((id) => UUID_RE.test(id))) {
+      return res.status(400).json({ error: "Invalid ids — expected comma-separated UUIDs" });
+    }
+  }
+
+  try {
+    const decksResult = await pool.query(
+      `SELECT id FROM decks
+       WHERE user_id = $1 AND deleted_at IS NULL
+       ${deckIds ? "AND id = ANY($2::uuid[])" : ""}`,
+      deckIds ? [req.user.id, deckIds] : [req.user.id]
+    );
+
+    const liveIds = decksResult.rows.map((r) => r.id);
+
+    const byDeck = {};
+    for (const id of liveIds) byDeck[id] = [];
+
+    if (liveIds.length > 0) {
+      const statsResult = await pool.query(
+        `SELECT * FROM deck_stats
+         WHERE user_id = $1 AND deck_id = ANY($2::uuid[])
+         ORDER BY deck_id, date DESC`,
+        [req.user.id, liveIds]
+      );
+      for (const row of statsResult.rows) byDeck[row.deck_id].push(row);
+    }
+
+    res.json(byDeck);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+// ========================
 // GET DECK STATS
 // ========================
 router.get("/deck/:deckId", authMiddleware, async (req, res) => {

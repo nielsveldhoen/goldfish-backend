@@ -934,8 +934,50 @@ Geen wijzigingen sinds `since` → `"deck_stats": []` en `"daily_snapshots": []`
 
 ---
 
+### GET `/stats/decks`
+Alle dagelijkse deck-statistieken van de gebruiker **in één request**, gegroepeerd per deck — de batch-variant van `GET /stats/deck/:deckId`. Bedoeld voor het dashboard: één call in plaats van één per deck.
+
+**Query-parameters:**
+
+| Parameter | Type | Verplicht | Beschrijving |
+|-----------|------|-----------|--------------|
+| `ids` | string | nee | Komma-gescheiden deck-UUID's. Weggelaten of leeg → alle levende decks van de gebruiker. |
+
+Alleen **levende** (niet-verwijderde) decks van de ingelogde gebruiker tellen mee; verwijderde of andermans deck-id's in `ids` worden stilzwijgend genegeerd. Elk levend (gevraagd) deck krijgt een key in de response, ook als er nog geen stats-rijen zijn (lege array) — zo is "deck zonder stats" te onderscheiden van "deck niet teruggekregen".
+
+**Response `200`:** object met per deck-id een array rij-objecten, per deck gesorteerd van nieuw naar oud. De rij-objecten zijn identiek aan die van `GET /stats/deck/:deckId`.
+```json
+{
+  "3f2a...uuid": [
+    {
+      "id": "uuid",
+      "user_id": "uuid",
+      "deck_id": "3f2a...uuid",
+      "date": "2026-05-14",
+      "cards_practiced": 5,
+      "cards_correct_first_try": 3,
+      "core_cards_practiced": 2,
+      "core_correct_first_try": 1,
+      "avg_remote_score": "3.40",
+      "avg_stable_score": "1.80",
+      "avg_recent_score": "2.10",
+      "avg_core_remote_score": "3.80",
+      "avg_core_stable_score": "2.40",
+      "avg_core_recent_score": "2.90",
+      "updated_at": "2026-05-14T14:32:00.000Z"
+    }
+  ],
+  "9b1c...uuid": []
+}
+```
+
+**Foutcodes:**
+- `400` — `ids` meegegeven maar geen geldige komma-gescheiden UUID's
+
+---
+
 ### GET `/stats/deck/:deckId`
-Alle dagelijkse statistieken voor één deck, gesorteerd van nieuw naar oud.
+Alle dagelijkse statistieken voor één deck, gesorteerd van nieuw naar oud. Meerdere decks nodig (bijv. dashboard)? Gebruik `GET /stats/decks` — één request voor alles.
 
 **Response `200`:**
 ```json
