@@ -30,7 +30,7 @@ De backend kent één naamset:
 
 **Paden:** alle endpoints zitten onder het prefix `/v2` (bijv. `/v2/review/due`). De paden in dit document staan voor de leesbaarheid zonder dat prefix; zet er in de praktijk `/v2` voor. Ongeprefixte paden bestaan niet meer.
 
-**WebSocket:** de payloads van `/ws`-events (`progress_saved`, `core_set`, `progress_deleted`) bevatten voortgangsobjecten met de veldnamen hierboven. Payloads zijn altijd een **array** van objecten, ook bij één item (zie het WebSocket-hoofdstuk).
+**WebSocket:** de payloads van `/ws`-events (`core_set`, `progress_deleted`) bevatten voortgangsobjecten met de veldnamen hierboven. Payloads zijn altijd een **array** van objecten, ook bij één item (zie het WebSocket-hoofdstuk).
 
 ---
 
@@ -596,7 +596,7 @@ Sla de voortgang op na het beantwoorden van een kaart. Ondersteunt twee modi:
   "client_updated_at": "2024-01-01T00:00:00.000Z"  // optioneel — ISO timestamp van de lokaal bekende versie
 }
 ```
-Werkt als upsert. `is_core` wordt alleen overschreven als het expliciet meegestuurd wordt.
+Werkt als upsert. `is_core` wordt alleen overschreven als het expliciet meegestuurd wordt. Modus 1 broadcast **geen** WebSocket-event; andere apparaten halen de wijziging op via `/sync/changes`.
 
 **Modus 2 — alleen `is_core` aanpassen:**
 ```json
@@ -1135,11 +1135,10 @@ Bulk-endpoints sturen dus **één** event met alle items in de array (geen event
 | `card_created`    | POST `/cards` of POST `/cards/bulk` (één event voor de hele batch) | volledige kaart-objecten |
 | `card_updated`    | PUT `/cards/:id`                     | bijgewerkte kaart-objecten       |
 | `card_deleted`    | DELETE `/cards/:id` of POST `/cards/bulk-delete` (één event voor de hele batch) | `{ "id": "uuid", "deck_id": "uuid" }` |
-| `progress_saved`  | POST `/review/progress` (modus 1)    | voortgangsobjecten               |
 | `core_set`        | POST `/review/progress` (modus 2)    | voortgangsobjecten               |
 | `progress_deleted`| DELETE `/review/progress/:card_id`   | voortgangsobjecten (met `deleted_at` gezet) |
 
-> **Let op:** de payload-items van `progress_saved`, `core_set` en `progress_deleted` zijn voortgangsobjecten en bevatten dus **geen** `deck_id` — wel `card_id`. Clients die het bijbehorende deck nodig hebben, moeten dat lokaal opzoeken via de kaart. Bij `progress_deleted` bevatten de overige velden nog de oude waarden van vóór de reset; alleen de verwijdering toepassen.
+> **Let op:** de payload-items van `core_set` en `progress_deleted` zijn voortgangsobjecten en bevatten dus **geen** `deck_id` — wel `card_id`. Clients die het bijbehorende deck nodig hebben, moeten dat lokaal opzoeken via de kaart. Bij `progress_deleted` bevatten de overige velden nog de oude waarden van vóór de reset; alleen de verwijdering toepassen.
 
 ### Ping/pong en berichten van de client
 

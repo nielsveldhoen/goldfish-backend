@@ -269,8 +269,6 @@ router.post("/progress", authMiddleware, async (req, res) => {
          RETURNING *`,
         [req.user.id, card_id, remote_score, stable_score ?? 0, recent_score ?? null, due_date, repetitions || "", coreParam]
       );
-
-      broadcast(req.user.id, "progress_saved", result.rows[0]);
     }
 
     res.json(result.rows[0]);
