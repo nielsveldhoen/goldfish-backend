@@ -77,9 +77,12 @@ Registreer een nieuwe gebruiker. Na registratie wordt een verificatiemail gestuu
 **Response `200`:**
 ```json
 {
-  "message": "Registration successful. Check your email to verify your account."
+  "message": "Registration successful. Check your email to verify your account.",
+  "email_sent": true
 }
 ```
+
+> Registratie is atomair: user en verificatietoken worden in één transactie aangemaakt. Faalt daarna alleen het versturen van de verificatiemail, dan is het account tóch aangemaakt en antwoordt de server `200` met `"email_sent": false` (en een afwijkende `message`). De gebruiker kan dan via `POST /auth/resend-verification` een nieuwe mail aanvragen.
 
 **Foutcodes:**
 - `400` — ontbrekende velden, wachtwoord korter dan 8 tekens, of email/username bestaat al

@@ -47,32 +47,43 @@ router.post("/register", authLimiter, async (req, res) => {
   const emailNormalized = email.toLowerCase().trim();
   const usernameNormalized = (username || email.split("@")[0]).toLowerCase().trim();
 
-  try {
-    const hash = await argon2.hash(password);
+  const token = crypto.randomBytes(32).toString("hex");
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
 
-    const result = await pool.query(
+  // Hashen vóór pool.connect(): argon2 is bewust traag en hoeft geen
+  // DB-connectie bezet te houden.
+  let hash;
+  try {
+    hash = await argon2.hash(password);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Server error" });
+  }
+
+  // User- en token-insert in één transactie: faalt de tweede insert, dan
+  // blijft er geen account zonder verificatietoken achter.
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const result = await client.query(
       `INSERT INTO users (email, username, password_hash, email_verified)
        VALUES ($1, $2, $3, false)
-       RETURNING id, email, username`,
+       RETURNING id`,
       [emailNormalized, usernameNormalized, hash]
     );
 
-    const user = result.rows[0];
-
-    const token = crypto.randomBytes(32).toString("hex");
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
-
-    await pool.query(
+    await client.query(
       `INSERT INTO email_verification_tokens (user_id, token, expires_at)
        VALUES ($1, $2, $3)`,
-      [user.id, hashToken(token), expiresAt]
+      [result.rows[0].id, hashToken(token), expiresAt]
     );
 
-    await sendVerificationEmail(emailNormalized, token);
-
-    res.status(200).json({ message: "Registration successful. Check your email to verify your account." });
+    await client.query("COMMIT");
 
   } catch (err) {
+    await client.query("ROLLBACK");
+
     if (err.code === "23505") {
       return res.status(400).json({
         error: "Email or username already exists"
@@ -80,8 +91,28 @@ router.post("/register", authLimiter, async (req, res) => {
     }
 
     console.error(err);
-    res.status(500).json({ error: "Server error" });
+    return res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
   }
+
+  // De mail valt buiten de transactie: het account bestaat op dit punt al,
+  // dus een mail-fout is geen registratiefout. De gebruiker kan via
+  // /auth/resend-verification een nieuwe mail aanvragen.
+  try {
+    await sendVerificationEmail(emailNormalized, token);
+  } catch (err) {
+    console.error("verification email failed:", err);
+    return res.status(200).json({
+      message: "Registration successful, but the verification email could not be sent. Request a new one via resend.",
+      email_sent: false
+    });
+  }
+
+  res.status(200).json({
+    message: "Registration successful. Check your email to verify your account.",
+    email_sent: true
+  });
 });
 
 
