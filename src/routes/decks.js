@@ -246,9 +246,7 @@ router.post("/bulk-delete", authMiddleware, async (req, res) => {
 
     await client.query("COMMIT");
 
-    for (const { id } of result.rows) {
-      broadcast(req.user.id, "deck_deleted", { id });
-    }
+    broadcast(req.user.id, "deck_deleted", result.rows);
     res.json({ deleted: result.rowCount, ids: result.rows.map((r) => r.id) });
 
   } catch (err) {

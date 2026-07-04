@@ -174,7 +174,7 @@ router.post("/bulk", authMiddleware, async (req, res) => {
 
     await client.query("COMMIT");
 
-    for (const card of created) broadcast(req.user.id, "card_created", card);
+    broadcast(req.user.id, "card_created", created);
     res.status(201).json(created);
 
   } catch (err) {
@@ -241,9 +241,7 @@ router.post("/bulk-delete", authMiddleware, async (req, res) => {
 
     await client.query("COMMIT");
 
-    for (const { id, deck_id } of result.rows) {
-      broadcast(req.user.id, "card_deleted", { id, deck_id });
-    }
+    broadcast(req.user.id, "card_deleted", result.rows);
     res.json({ deleted: result.rowCount, ids: result.rows.map((r) => r.id) });
 
   } catch (err) {

@@ -30,7 +30,7 @@ De backend kent één naamset:
 
 **Paden:** alle endpoints zitten onder het prefix `/v2` (bijv. `/v2/review/due`). De paden in dit document staan voor de leesbaarheid zonder dat prefix; zet er in de praktijk `/v2` voor. Ongeprefixte paden bestaan niet meer.
 
-**WebSocket:** de payloads van `/ws`-events (`progress_saved`, `core_set`, `progress_deleted`) bevatten het voortgangsobject met de veldnamen hierboven.
+**WebSocket:** de payloads van `/ws`-events (`progress_saved`, `core_set`, `progress_deleted`) bevatten voortgangsobjecten met de veldnamen hierboven. Payloads zijn altijd een **array** van objecten, ook bij één item (zie het WebSocket-hoofdstuk).
 
 ---
 
@@ -314,7 +314,7 @@ Meerdere decks tegelijk soft-deleten (max **100** ids per request), in één tra
 ```
 `ids` bevat de ids die daadwerkelijk verwijderd zijn (genegeerde ids ontbreken).
 
-**Realtime:** per daadwerkelijk verwijderd deck wordt een `deck_deleted`-event gebroadcast met `{ "id": "uuid" }`, identiek aan `DELETE /decks/:id`. Genegeerde ids krijgen geen event.
+**Realtime:** er wordt **één** `deck_deleted`-event gebroadcast met als payload een array van `{ "id": "uuid" }`-objecten voor alle daadwerkelijk verwijderde decks. Genegeerde ids zitten niet in de array; wordt er niets verwijderd, dan komt er geen event.
 
 **Foutcodes:**
 - `400` — `deck_ids` ontbreekt, is leeg, of bevat meer dan 100 ids
@@ -467,7 +467,7 @@ Meerdere kaarten tegelijk soft-deleten (max **500** ids per request), in één t
 ```
 `ids` bevat de ids die daadwerkelijk verwijderd zijn (genegeerde ids ontbreken).
 
-**Realtime:** per daadwerkelijk verwijderde kaart wordt een `card_deleted`-event gebroadcast met `{ "id": "uuid", "deck_id": "uuid" }`, identiek aan `DELETE /cards/:id`. Genegeerde ids krijgen geen event.
+**Realtime:** er wordt **één** `card_deleted`-event gebroadcast met als payload een array van `{ "id": "uuid", "deck_id": "uuid" }`-objecten voor alle daadwerkelijk verwijderde kaarten. Genegeerde ids zitten niet in de array; wordt er niets verwijderd, dan komt er geen event.
 
 **Foutcodes:**
 - `400` — `card_ids` ontbreekt, is leeg, of bevat meer dan 500 ids
@@ -1111,30 +1111,32 @@ Het JWT-token wordt als query-parameter meegestuurd. Bij een ongeldig of ontbrek
 
 ### Berichtformaat
 
-Alle berichten zijn JSON:
+Alle berichten zijn JSON. `payload` is **altijd een array van objecten**, ook als het event maar één item betreft:
 ```json
 {
   "type": "event_type",
-  "payload": { /* object */ },
+  "payload": [ /* array van objecten, ook bij één item */ ],
   "server_time": "2024-01-01T00:00:00.000Z"
 }
 ```
 
+Bulk-endpoints sturen dus **één** event met alle items in de array (geen event per item). Een lege array wordt nooit verstuurd: als een bulk-delete niets verwijdert, komt er geen event.
+
 ### Eventtypen
 
-| `type`            | Trigger                              | `payload`                        |
+| `type`            | Trigger                              | `payload` (array van …)          |
 |-------------------|--------------------------------------|----------------------------------|
-| `deck_created`    | POST `/decks`                        | volledig deck-object             |
-| `deck_updated`    | PUT `/decks/:id`                     | bijgewerkt deck-object           |
-| `deck_deleted`    | DELETE `/decks/:id` of POST `/decks/bulk-delete` (per verwijderd deck) | `{ "id": "uuid" }` |
-| `card_created`    | POST `/cards` of POST `/cards/bulk`  | volledig kaart-object            |
-| `card_updated`    | PUT `/cards/:id`                     | bijgewerkt kaart-object          |
-| `card_deleted`    | DELETE `/cards/:id` of POST `/cards/bulk-delete` (per verwijderde kaart) | `{ "id": "uuid", "deck_id": "uuid" }` |
-| `progress_saved`  | POST `/review/progress` (modus 1)    | voortgangsobject                 |
-| `core_set`        | POST `/review/progress` (modus 2)    | voortgangsobject                 |
-| `progress_deleted`| DELETE `/review/progress/:card_id`   | voortgangsobject (met `deleted_at` gezet) |
+| `deck_created`    | POST `/decks`                        | volledige deck-objecten          |
+| `deck_updated`    | PUT `/decks/:id`                     | bijgewerkte deck-objecten        |
+| `deck_deleted`    | DELETE `/decks/:id` of POST `/decks/bulk-delete` (één event voor de hele batch) | `{ "id": "uuid" }` |
+| `card_created`    | POST `/cards` of POST `/cards/bulk` (één event voor de hele batch) | volledige kaart-objecten |
+| `card_updated`    | PUT `/cards/:id`                     | bijgewerkte kaart-objecten       |
+| `card_deleted`    | DELETE `/cards/:id` of POST `/cards/bulk-delete` (één event voor de hele batch) | `{ "id": "uuid", "deck_id": "uuid" }` |
+| `progress_saved`  | POST `/review/progress` (modus 1)    | voortgangsobjecten               |
+| `core_set`        | POST `/review/progress` (modus 2)    | voortgangsobjecten               |
+| `progress_deleted`| DELETE `/review/progress/:card_id`   | voortgangsobjecten (met `deleted_at` gezet) |
 
-> **Let op:** de payload van `progress_saved`, `core_set` en `progress_deleted` is het voortgangsobject en bevat dus **geen** `deck_id` — wel `card_id`. Clients die het bijbehorende deck nodig hebben, moeten dat lokaal opzoeken via de kaart. Bij `progress_deleted` bevatten de overige velden nog de oude waarden van vóór de reset; alleen de verwijdering toepassen.
+> **Let op:** de payload-items van `progress_saved`, `core_set` en `progress_deleted` zijn voortgangsobjecten en bevatten dus **geen** `deck_id` — wel `card_id`. Clients die het bijbehorende deck nodig hebben, moeten dat lokaal opzoeken via de kaart. Bij `progress_deleted` bevatten de overige velden nog de oude waarden van vóór de reset; alleen de verwijdering toepassen.
 
 ### Ping/pong en berichten van de client
 

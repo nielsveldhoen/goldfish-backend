@@ -94,13 +94,19 @@ export function createWsServer(server) {
   return wss;
 }
 
+// Protocolcontract: payload is op de draad áltijd een array van objecten,
+// ook bij één item. Call sites mogen een los object of een array aanleveren;
+// een lege array wordt niet verstuurd.
 export function broadcast(userId, type, payload, exclude = null) {
+  const items = Array.isArray(payload) ? payload : [payload];
+  if (items.length === 0) return;
+
   const sockets = connections.get(userId);
   if (!sockets) return;
 
   const message = JSON.stringify({
     type,
-    payload,
+    payload: items,
     server_time: new Date().toISOString(),
   });
 

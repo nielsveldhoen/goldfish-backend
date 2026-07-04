@@ -10,7 +10,7 @@ import "../src/config/env.js";
 // Korte heartbeat zodat de expiry-check in de test snel draait;
 // moet gezet zijn vóór ws.js geïmporteerd wordt.
 process.env.WS_HEARTBEAT_INTERVAL_MS = "200";
-const { createWsServer } = await import("../src/ws.js");
+const { createWsServer, broadcast } = await import("../src/ws.js");
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -86,6 +86,31 @@ describe("WebSocket auth en robuustheid", () => {
     // Twee heartbeat-intervallen later moet de verbinding nog openstaan
     await sleep(500);
     assert.equal(socket.readyState, WebSocket.OPEN, "verbinding mag niet gesloten zijn");
+
+    socket.close();
+  });
+
+  test("broadcast: payload is op de draad altijd een array", async () => {
+    const token = jwt.sign({ userId: USER_ID }, process.env.JWT_SECRET, {
+      expiresIn: "1h",
+    });
+    const socket = connect(`?token=${token}`);
+    await waitForOpen(socket);
+
+    const received = [];
+    socket.on("message", (data) => received.push(JSON.parse(data.toString())));
+
+    broadcast(USER_ID, "card_created", { id: "a" }); // los object → gewrapt
+    broadcast(USER_ID, "card_deleted", [{ id: "b" }, { id: "c" }]); // array → as-is
+    broadcast(USER_ID, "deck_deleted", []); // lege array → geen bericht
+
+    await sleep(200);
+
+    assert.equal(received.length, 2);
+    assert.deepEqual(received[0].payload, [{ id: "a" }]);
+    assert.equal(received[0].type, "card_created");
+    assert.deepEqual(received[1].payload, [{ id: "b" }, { id: "c" }]);
+    assert.ok(received[0].server_time);
 
     socket.close();
   });
