@@ -27,6 +27,7 @@ De backend kent één naamset:
 **`recent` is optioneel bij writes:**
 - `recent_score` bij `POST /review/progress`: **weggelaten = waarde blijft onveranderd**.
 - `avg_recent_score` en `avg_core_remote_score`/`avg_core_stable_score`/`avg_core_recent_score` in `deck_delta`/`daily_snapshot` bij `POST /stats/update`: weggelaten = bestaande waarde blijft staan. (`avg_remote_score`/`avg_stable_score` overschrijven daarentegen altijd, ook met `null`.)
+- `total_cards`/`total_core_cards` in `deck_delta` bij `POST /stats/update`: absolute deckgroottes die de bestaande waarde overschrijven; weggelaten = onveranderd. Bestaande rijen zijn `null` (geen backfill). Oudere clients sturen ze niet mee.
 
 **Paden:** alle endpoints zitten onder het prefix `/v2` (bijv. `/v2/review/due`). De paden in dit document staan voor de leesbaarheid zonder dat prefix; zet er in de praktijk `/v2` voor. Ongeprefixte paden bestaan niet meer.
 
@@ -863,6 +864,8 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
     "cards_correct_first_try": 1,
     "core_cards_practiced": 0,
     "core_correct_first_try": 0,
+    "total_cards": 42,               // optioneel — absoluut aantal kaarten in dit deck (overschrijft; weglaten = onveranderd)
+    "total_core_cards": 18,          // optioneel — absoluut aantal core-kaarten in dit deck (overschrijft; weglaten = onveranderd)
     "avg_remote_score": 3.40,        // actuele gemiddelde remote_score over alle kaarten (overschrijft)
     "avg_stable_score": 1.80,        // actuele gemiddelde stable_score over alle kaarten (overschrijft)
     "avg_recent_score": 2.10,        // optioneel — gemiddelde recent_score over alle kaarten (weglaten = onveranderd)
@@ -871,14 +874,14 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
     "avg_core_recent_score": 2.90    // optioneel — gemiddelde recent_score over alleen core-kaarten
   },
 
-  "daily_delta": {            // verplicht — delta voor de dagelijkse user-totalen (0 of 1 per veld)
+  "daily_delta": {            // optioneel — delta voor de dagelijkse user-totalen (0 of 1 per veld); alleen gebruikt als daily_snapshot meekomt
     "cards_practiced_today": 1,
     "correct_first_try_today": 1,
     "core_practiced_today": 0,
     "core_correct_first_try_today": 0
   },
 
-  "daily_snapshot": {         // verplicht — absolute waarden (overschrijven bestaande waarden)
+  "daily_snapshot": {         // optioneel (deprecatiepad) — weggelaten = user_daily_snapshot niet bijwerken; nieuwe clients sturen dit niet meer
     "total_cards": 42,        // optioneel — weglaten als onveranderd (bijv. bij reviews)
     "total_core_cards": 18,    // optioneel — weglaten als onveranderd
     "avg_remote_score": 3.40,        // gemiddelde remote_score over alle kaarten (overschrijft)
@@ -903,6 +906,8 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
     "cards_correct_first_try": 3,
     "core_cards_practiced": 2,
     "core_correct_first_try": 1,
+    "total_cards": 42,
+    "total_core_cards": 18,
     "avg_remote_score": "3.40",
     "avg_stable_score": "1.80",
     "avg_recent_score": "2.10",
@@ -932,8 +937,10 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
 }
 ```
 
+`total_cards`/`total_core_cards` op `deck_stats` zijn de per-deck deckgroottes op die datum; ze zijn `null` zolang ze nog nooit gezet zijn (geen backfill). Wordt `daily_snapshot` weggelaten, dan blijft `user_daily_snapshot` ongemoeid en is `daily_snapshot` in de response `null`.
+
 **Foutcodes:**
-- `400` — ontbrekende velden
+- `400` — ontbrekende velden (`date`, `deck_id` of `deck_delta`)
 - `403` — deck is niet van deze gebruiker
 
 ---
@@ -946,7 +953,9 @@ Alleen levende rijen worden teruggegeven; er is **geen soft-delete**. Een `deck_
 **Query params:**
 - `since` (optioneel) — ISO 8601 timestamp. Alleen rijen met `updated_at > since` (strikt `>`) worden teruggegeven. Leeg of weggelaten = epoch, dus de eerste sync geeft de volledige historie terug.
 
-De rij-objecten hebben exact dezelfde veldnamen als `/stats/deck/:deckId` (`deck_stats`) en `/stats/daily` (`daily_snapshots`). De `avg_core_*`-velden zijn `null` als er geen core-kaarten geoefend zijn (niet `0`). `date` is `YYYY-MM-DD`.
+De rij-objecten hebben exact dezelfde veldnamen als `/stats/deck/:deckId` (`deck_stats`) en `/stats/daily` (`daily_snapshots`). De `avg_core_*`-velden zijn `null` als er geen core-kaarten geoefend zijn (niet `0`). `deck_stats.total_cards`/`total_core_cards` zijn `null` voor rijen waar ze nog nooit gezet zijn. `date` is `YYYY-MM-DD`.
+
+> **Deprecatie:** `daily_snapshots` blijft voorlopig in de response staan, maar nieuwe clients berekenen de "all decks"-statistieken door `deck_stats` te aggregeren (gewogen op `total_cards` per datum) en lezen `user_daily_snapshot` niet meer. Zodra oude clients uitgefaseerd zijn vervalt `daily_snapshots` hier en wordt de tabel gedropt.
 
 **Response `200`:** object met `deck_stats` + `daily_snapshots` (delta) + `server_time` (volgend watermerk)
 ```json
@@ -961,6 +970,8 @@ De rij-objecten hebben exact dezelfde veldnamen als `/stats/deck/:deckId` (`deck
       "cards_correct_first_try": 3,
       "core_cards_practiced": 2,
       "core_correct_first_try": 1,
+      "total_cards": 42,
+      "total_core_cards": 18,
       "avg_remote_score": "3.40",
       "avg_stable_score": "1.80",
       "avg_recent_score": "2.10",
@@ -1057,6 +1068,8 @@ Alle dagelijkse statistieken voor één deck, gesorteerd van nieuw naar oud. Mee
     "cards_correct_first_try": 3,
     "core_cards_practiced": 2,
     "core_correct_first_try": 1,
+    "total_cards": 42,
+    "total_core_cards": 18,
     "avg_remote_score": "3.40",
     "avg_stable_score": "1.80",
     "avg_recent_score": "2.10",

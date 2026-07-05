@@ -15,6 +15,8 @@ sudo -u postgres psql -d goldfish -f 007_add_core_avg_scores.sql
 sudo -u postgres psql -d goldfish -f 008_cleanup_orphan_progress.sql
 sudo -u postgres psql -d goldfish -f 009_stats_updated_at_watermark.sql
 sudo -u postgres psql -d goldfish -f 010_tombstone_purge_indexes.sql
+sudo -u postgres psql -d goldfish -f 011_decks_inactive.sql
+sudo -u postgres psql -d goldfish -f 012_deck_stats_totals.sql
 ```
 
 | Bestand | Wat | Herhaalbaar? |
@@ -29,6 +31,8 @@ sudo -u postgres psql -d goldfish -f 010_tombstone_purge_indexes.sql
 | `008_cleanup_orphan_progress.sql` | softdeletet bestaande wees-`user_card_progress`-records waarvan de card of het deck al soft-deleted is (maakt core-telling consistent; cascade-fix in de DELETE-handlers voorkomt nieuwe) | ja, idempotent (al gesoftdelete records vallen buiten de `WHERE`) |
 | `009_stats_updated_at_watermark.sql` | server-side `updated_at`-watermark voor `GET /stats/changes`: `set_updated_at()`-trigger op `deck_stats` + `user_daily_snapshot` (bumpt `updated_at` bij elke UPDATE) + index `(user_id, updated_at)` op beide. Reverse: `009_stats_updated_at_watermark_down.sql` | ja, idempotent (`IF NOT EXISTS` / `CREATE OR REPLACE` / `DROP … IF EXISTS` + `CREATE`) |
 | `010_tombstone_purge_indexes.sql` | partial indexen `(deleted_at) WHERE deleted_at IS NOT NULL` op `user_card_progress`, `cards`, `decks` voor de dagelijkse tombstone-purge (`src/jobs/purgeTombstones.js`, hard-delete van soft-deletes ouder dan `TOMBSTONE_RETENTION_DAYS`) | ja, idempotent (`CREATE INDEX IF NOT EXISTS`) |
+| `011_decks_inactive.sql` | `inactive`-kolom (`BOOLEAN NOT NULL DEFAULT false`) op `decks` (archiveerbaar; client verbergt inactieve decks, core-kaarten blijven trainen) | ja, idempotent (`ADD COLUMN IF NOT EXISTS`) |
+| `012_deck_stats_totals.sql` | `total_cards`/`total_core_cards` (`INTEGER NULL`) op `deck_stats` — historische deckgrootte per `(deck, datum)`, zodat de client de "all decks"-stats uit `deck_stats` kan aggregeren i.p.v. `user_daily_snapshot`. Bestaande rijen blijven `null` (geen backfill) | ja, idempotent (`ADD COLUMN IF NOT EXISTS`) |
 
 **Minimale clientversie bijstellen** (geen migratie — gewoon DML):
 ```sql
