@@ -5,6 +5,7 @@ import cors from "cors";
 import helmet from "helmet";
 
 import authRoutes from "./routes/auth.js";
+import passwordResetRoutes from "./routes/passwordReset.js";
 import deckRoutes from "./routes/decks.js";
 import cardRoutes from "./routes/cards.js";
 import reviewRoutes from "./routes/review.js";
@@ -14,9 +15,14 @@ import { requireClientVersion, minClientBuild } from "./middleware/clientVersion
 
 const app = express();
 
-// Achter de reverse proxy (Caddy op dezelfde machine): vertrouw precies één
-// proxy-hop zodat express-rate-limit het echte client-IP uit X-Forwarded-For leest.
-app.set("trust proxy", 1);
+// TRUST_PROXY = aantal vertrouwde proxy-hops vóór de app (Caddy op dezelfde
+// machine: 1). Alléén zetten wanneer de app daadwerkelijk achter die proxy
+// zit: staat de poort rechtstreeks open naar het netwerk, dan zou een client
+// met een zelfverzonnen X-Forwarded-For-header anders per request een ander
+// "IP" claimen en zo de rate limiter op /auth omzeilen. Default: geen enkele
+// proxy vertrouwen (express-rate-limit telt dan op het echte socket-adres).
+const trustProxy = Number(process.env.TRUST_PROXY) || 0;
+if (trustProxy > 0) app.set("trust proxy", trustProxy);
 
 app.use(helmet());
 
@@ -54,6 +60,8 @@ app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
 app.use(express.json({ limit: "1mb" }));
+// Alleen voor het wachtwoord-reset-browserformulier (POST /auth/reset-password).
+app.use(express.urlencoded({ extended: false, limit: "10kb" }));
 
 // Request-log zonder query string: die kan tokens bevatten (/auth/verify-email, /ws).
 app.use((req, _res, next) => {
@@ -87,6 +95,11 @@ app.get("/version", async (req, res) => {
 app.get("/", (req, res) => {
   res.send("Goldfish API running 🐟");
 });
+
+// Wachtwoord-reset (browser-flow): de link uit de mail opent in een browser,
+// die geen X-Client-Build meestuurt — daarom buiten /v2 en buiten de
+// versiegate, net als /version.
+app.use("/auth/reset-password", passwordResetRoutes);
 
 // Alle API-routes zitten onder een expliciet versie-prefix en achter de
 // client-versiegate. Nu alleen /v2; een toekomstige versie krijgt een eigen

@@ -85,8 +85,10 @@ Registreer een nieuwe gebruiker. Na registratie wordt een verificatiemail gestuu
 
 > Registratie is atomair: user en verificatietoken worden in één transactie aangemaakt. Faalt daarna alleen het versturen van de verificatiemail, dan is het account tóch aangemaakt en antwoordt de server `200` met `"email_sent": false` (en een afwijkende `message`). De gebruiker kan dan via `POST /auth/resend-verification` een nieuwe mail aanvragen.
 
+> **Anti-enumeration:** bestaat het e-mailadres al, dan is de response *identiek* aan een geslaagde registratie (`200`) — er wordt dan geen account aangemaakt maar een "je hebt al een account"-mail gestuurd die naar de wachtwoord-reset wijst. De client kan een bestaand adres dus niet aan de response aflezen; dat is bewust.
+
 **Foutcodes:**
-- `400` — ontbrekende velden, wachtwoord korter dan 8 tekens, of email/username bestaat al
+- `400` — ontbrekende velden, wachtwoord korter dan 8 tekens, of username al bezet (`"Username already taken"`, alleen wanneer het e-mailadres nog vrij is)
 
 ---
 
@@ -162,6 +164,54 @@ Stuur een nieuwe verificatiemail. Geeft altijd dezelfde response terug, ook als 
 
 **Foutcodes:**
 - `400` — ontbrekend e-mailadres
+
+---
+
+### POST `/auth/forgot-password`
+Vraag een wachtwoord-reset-link aan. Geeft altijd dezelfde response terug, ook als het e-mailadres niet bestaat (voorkomt user enumeration). Bestaat het adres wél, dan wordt er een mail gestuurd met een link die **1 uur** geldig en single-use is; een nieuwe aanvraag vervangt de vorige link. De reset zelf verloopt via de browser (zie hieronder), niet via de app.
+
+**Rate limit:** 20 verzoeken per 15 minuten.
+
+**Request body:**
+```json
+{
+  "email": "user@example.com"
+}
+```
+
+**Response `200`:**
+```json
+{
+  "message": "If your email exists, a password reset email has been sent."
+}
+```
+
+**Foutcodes:**
+- `400` — ontbrekend e-mailadres
+
+---
+
+### GET / POST `/auth/reset-password` (zónder `/v2`-prefix)
+Browser-flow voor de reset-link uit de mail — de client hoeft hier niets mee, maar voor de volledigheid: `GET ?token=...` toont een HTML-formulier; de `POST` (formulier of JSON `{ "token", "password" }`) voert de reset uit. Deze routes staan **buiten** het `/v2`-prefix en buiten de client-versiegate, omdat een browser geen `X-Client-Build` meestuurt.
+
+Een geslaagde reset:
+- zet het nieuwe wachtwoord (minimaal 8 tekens),
+- zet `email_verified = true` (de reset bewijst bezit van de mailbox),
+- **trekt alle bestaande JWT's van de gebruiker in** — elk apparaat krijgt op zijn eerstvolgende call een `401` en moet opnieuw inloggen.
+
+---
+
+### POST `/auth/logout-all` 🔒
+Trekt **alle** JWT's van de ingelogde gebruiker per direct in (ook het token waarmee deze call gedaan is). Elk apparaat — inclusief dit — krijgt daarna `401` op API-calls en `4001` bij een nieuwe WS-handshake, en moet opnieuw inloggen. Gebruik dit bij een kwijtgeraakt/gestolen apparaat.
+
+**Response `200`:**
+```json
+{
+  "message": "All sessions revoked"
+}
+```
+
+> **Revocatie-mechanisme:** de server bewaart per gebruiker een watermerk (`tokens_valid_after`). Tokens die vóór dat moment zijn uitgegeven worden geweigerd door alle 🔒-endpoints en door de WS-handshake. Een gewone logout in de app blijft client-side (token weggooien); `logout-all` en de wachtwoord-reset zetten het watermerk.
 
 ---
 

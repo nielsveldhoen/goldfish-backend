@@ -19,7 +19,13 @@ De SQL-bestanden staan in [`migrations/`](migrations/) — zie de README daar.
 ```bash
 sudo -u postgres psql -d goldfish -f migrations/001_progress_deleted_at.sql
 sudo -u postgres psql -d goldfish -f migrations/002_hash_verification_tokens.sql   # éénmalig!
+# ... 003 t/m 011 ...
+sudo -u postgres psql -d goldfish -f migrations/013_password_reset_and_token_revocation.sql
 ```
+
+⚠️ Migratie 013 is **vereist** vóór het deployen van de bijbehorende
+backend-versie: het auth-middleware leest `users.tokens_valid_after` op elke
+request en de reset-flow schrijft naar `password_reset_tokens`.
 
 ### 2. Environment
 
@@ -27,8 +33,11 @@ Kopieer `.env.example` naar `src/.env` en vul alles in. Belangrijk in
 productie:
 
 - `HOST=127.0.0.1` — de app is dan alleen via de proxy bereikbaar.
-- `APP_URL=https://<jouw-domein>` — verificatielinks in e-mails wijzen
-  anders naar het verkeerde adres.
+- `TRUST_PROXY=1` — **alleen** zetten wanneer de app achter Caddy zit.
+  Zonder proxy weglaten: de app vertrouwt `X-Forwarded-For` dan niet, zodat
+  de rate limiter op `/auth` niet met een verzonnen header te omzeilen is.
+- `APP_URL=https://<jouw-domein>` — verificatie- en wachtwoord-reset-links
+  in e-mails wijzen anders naar het verkeerde adres.
 - `JWT_SECRET` — lang en willekeurig; staat nooit in de code.
 
 ### 3. Caddy
@@ -82,3 +91,20 @@ npm test                               # integratietests (lokaal, vereist DB)
   inclusief soft-delete die via `/sync/changes` naar andere apparaten gaat.
 - Nieuw WS-event `progress_deleted`.
 - Integratietests in `test/` (`npm test`).
+
+## Gewijzigd juli 2026 (migratie 013)
+
+- **Wachtwoord-reset**: `POST /v2/auth/forgot-password` (in de app) mailt een
+  1 uur geldige, gehashte single-use reset-link; `GET/POST
+  /auth/reset-password` (buiten `/v2`, browser-flow) voert de reset uit. Een
+  geslaagde reset verifieert het e-mailadres en trekt alle JWT's in.
+- **JWT-revocatie**: `users.tokens_valid_after` als watermerk; het
+  auth-middleware en de WS-handshake weigeren oudere tokens. `POST
+  /v2/auth/logout-all` trekt alle sessies van de gebruiker in.
+- **Anti-enumeration**: registratie met een bestaand e-mailadres antwoordt
+  identiek aan een geslaagde registratie; de eigenaar krijgt een
+  "je hebt al een account"-mail.
+- **`TRUST_PROXY`** env-gestuurd (default: geen proxy vertrouwen) — voorkomt
+  rate-limit-bypass via een gespoofde `X-Forwarded-For` zolang de app
+  rechtstreeks (zonder Caddy) aan het netwerk hangt.
+- Dagelijkse purge-job veegt nu ook verlopen verificatie- en reset-tokens.

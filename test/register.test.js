@@ -59,8 +59,9 @@ describe("POST /auth/register", () => {
     assert.equal(sendMock.mock.callCount(), 1);
   });
 
-  test("duplicate registratie → 400 'Email or username already exists'", async (t) => {
+  test("duplicate e-mail → response identiek aan succes (anti-enumeration) + account-bestaat-mail", async (t) => {
     t.mock.method(mailer, "sendVerificationEmail", async () => {});
+    const existsMock = t.mock.method(mailer, "sendAccountExistsEmail", async () => {});
 
     const email = freshEmail();
     const first = await register({ email, password: "wachtwoord123" });
@@ -68,8 +69,26 @@ describe("POST /auth/register", () => {
     createdUserIds.push((await userByEmail(email)).id);
 
     const dup = await register({ email, password: "anderwachtwoord" });
+    assert.equal(dup.status, 200);
+    assert.deepEqual(dup.body, first.body, "dup-response moet byte-gelijk zijn aan succes-response");
+    assert.equal(existsMock.mock.callCount(), 1);
+
+    // En het bestaande account is onaangetast (geen tweede user, wachtwoord ongewijzigd)
+    const { rowCount } = await pool.query(`SELECT 1 FROM users WHERE email = $1`, [email]);
+    assert.equal(rowCount, 1);
+  });
+
+  test("duplicate username bij vrij e-mailadres → 400 'Username already taken'", async (t) => {
+    t.mock.method(mailer, "sendVerificationEmail", async () => {});
+
+    const username = `dupname-${crypto.randomBytes(6).toString("hex")}`;
+    const first = await register({ email: freshEmail(), username, password: "wachtwoord123" });
+    assert.equal(first.status, 200);
+    createdUserIds.push((await pool.query(`SELECT id FROM users WHERE username = $1`, [username])).rows[0].id);
+
+    const dup = await register({ email: freshEmail(), username, password: "wachtwoord123" });
     assert.equal(dup.status, 400);
-    assert.equal(dup.body.error, "Email or username already exists");
+    assert.equal(dup.body.error, "Username already taken");
   });
 
   test("mail-fout → 200 met email_sent:false, user + token staan wél in de DB", async (t) => {

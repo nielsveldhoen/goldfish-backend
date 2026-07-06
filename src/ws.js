@@ -1,5 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import jwt from "jsonwebtoken";
+import { pool } from "./db.js";
+import { isRevoked } from "./middleware/auth.js";
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -16,7 +18,7 @@ const connections = new Map();
 export function createWsServer(server) {
   const wss = new WebSocketServer({ server, path: "/ws" });
 
-  wss.on("connection", (socket, req) => {
+  wss.on("connection", async (socket, req) => {
     const url = new URL(req.url, "http://localhost");
     const token = url.searchParams.get("token");
 
@@ -26,8 +28,9 @@ export function createWsServer(server) {
     }
 
     let userId;
+    let decoded;
     try {
-      const decoded = jwt.verify(token, JWT_SECRET);
+      decoded = jwt.verify(token, JWT_SECRET);
       userId = decoded.userId;
       // exp in seconden; nodig om de verbinding te sluiten zodra het token
       // tijdens de sessie verloopt.
@@ -36,6 +39,28 @@ export function createWsServer(server) {
       socket.close(CLOSE_UNAUTHORIZED, "Unauthorized");
       return;
     }
+
+    // Revocatie-check, zelfde regels als het REST-middleware. Alleen bij de
+    // handshake: wordt het token daarná ingetrokken, dan krijgt de client op
+    // zijn eerstvolgende REST-call een 401 en verbreekt hij zelf de WS.
+    try {
+      const { rows } = await pool.query(
+        `SELECT tokens_valid_after FROM users WHERE id = $1`,
+        [userId]
+      );
+      if (rows.length === 0 || isRevoked(decoded, rows[0].tokens_valid_after)) {
+        socket.close(CLOSE_UNAUTHORIZED, "Unauthorized");
+        return;
+      }
+    } catch (err) {
+      console.error("[ws] revocation lookup failed:", err);
+      socket.close(1011, "Server error");
+      return;
+    }
+
+    // De lookup is async: is de socket intussen al dichtgegaan, registreer
+    // hem dan niet meer (anders blijft hij als wees in `connections` hangen).
+    if (socket.readyState !== WebSocket.OPEN) return;
 
     socket.isAlive = true;
 

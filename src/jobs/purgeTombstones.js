@@ -35,17 +35,32 @@ export async function purgeTombstones(retentionDays = TOMBSTONE_RETENTION_DAYS) 
       [days]
     );
 
+    // Geen tombstones, maar dezelfde dagelijkse hygiëne: verlopen
+    // verificatie- en wachtwoord-reset-tokens zijn onbruikbaar (de routes
+    // checken expires_at) en hoeven dus niet te blijven staan.
+    const authTokens = await client.query(
+      `WITH v AS (
+         DELETE FROM email_verification_tokens WHERE expires_at < now() RETURNING 1
+       ), p AS (
+         DELETE FROM password_reset_tokens WHERE expires_at < now() RETURNING 1
+       )
+       SELECT (SELECT COUNT(*) FROM v) + (SELECT COUNT(*) FROM p) AS count`
+    );
+
     await client.query("COMMIT");
 
+    const expiredAuthTokens = Number(authTokens.rows[0].count);
     console.log(
       `[purgeTombstones] purged progress=${progress.rowCount}, ` +
-        `cards=${cards.rowCount}, decks=${decks.rowCount} (retention ${days}d)`
+        `cards=${cards.rowCount}, decks=${decks.rowCount}, ` +
+        `expired auth tokens=${expiredAuthTokens} (retention ${days}d)`
     );
 
     return {
       progress: progress.rowCount,
       cards: cards.rowCount,
       decks: decks.rowCount,
+      expiredAuthTokens,
     };
   } catch (err) {
     await client.query("ROLLBACK");

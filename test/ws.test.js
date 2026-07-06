@@ -6,17 +6,22 @@ import http from "http";
 import jwt from "jsonwebtoken";
 import WebSocket from "ws";
 import "../src/config/env.js";
+import { pool } from "../src/db.js";
 
 // Korte heartbeat zodat de expiry-check in de test snel draait;
 // moet gezet zijn vóór ws.js geïmporteerd wordt.
 process.env.WS_HEARTBEAT_INTERVAL_MS = "200";
 const { createWsServer, broadcast } = await import("../src/ws.js");
+const { createUser, cleanupUser, closePool } = await import("./helpers.js");
 
-const USER_ID = "11111111-1111-4111-8111-111111111111";
+// De handshake checkt sinds migratie 013 het revocatie-watermerk in de DB,
+// dus een geldige verbinding vereist een échte user (zie before()).
+let USER_ID;
 
 let server, port, wss;
 
 before(async () => {
+  USER_ID = (await createUser()).id;
   server = http.createServer();
   wss = createWsServer(server);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -26,6 +31,8 @@ before(async () => {
 after(async () => {
   wss.close();
   await new Promise((resolve) => server.close(resolve));
+  await cleanupUser(USER_ID);
+  await closePool();
 });
 
 function connect(query) {
@@ -97,6 +104,11 @@ describe("WebSocket auth en robuustheid", () => {
     const socket = connect(`?token=${token}`);
     await waitForOpen(socket);
 
+    // De handshake registreert de socket pas ná de async revocatie-lookup;
+    // een broadcast vlak na client-side open kan daar nog vóór vallen. In
+    // productie dekt de catchup-sync dat venster af; hier even wachten.
+    await sleep(150);
+
     const received = [];
     socket.on("message", (data) => received.push(JSON.parse(data.toString())));
 
@@ -113,6 +125,24 @@ describe("WebSocket auth en robuustheid", () => {
     assert.ok(received[0].server_time);
 
     socket.close();
+  });
+
+  test("ingetrokken token (revocatie-watermerk) → close 4001", async () => {
+    const revoked = await createUser();
+    try {
+      const token = jwt.sign({ userId: revoked.id }, process.env.JWT_SECRET, {
+        expiresIn: "1h",
+      });
+      // Watermerk ná de iat van het token (interval tegen zelfde-seconde-randgeval)
+      await pool.query(
+        `UPDATE users SET tokens_valid_after = NOW() + interval '1 second' WHERE id = $1`,
+        [revoked.id]
+      );
+      const { code } = await waitForClose(connect(`?token=${token}`));
+      assert.equal(code, 4001);
+    } finally {
+      await cleanupUser(revoked.id);
+    }
   });
 
   test("token verloopt tijdens de verbinding → close 4001", async () => {

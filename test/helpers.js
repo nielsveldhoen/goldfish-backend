@@ -62,6 +62,7 @@ export async function cleanupUser(userId) {
   );
   await pool.query(`DELETE FROM decks WHERE user_id = $1`, [userId]);
   await pool.query(`DELETE FROM email_verification_tokens WHERE user_id = $1`, [userId]);
+  await pool.query(`DELETE FROM password_reset_tokens WHERE user_id = $1`, [userId]);
   await pool.query(`DELETE FROM users WHERE id = $1`, [userId]);
 }
 
