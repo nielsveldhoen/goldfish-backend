@@ -633,6 +633,17 @@ Bevat ook nog-nieuwe kaarten (`is_new = true`); voor die kaarten zijn de scores 
 
 ---
 
+### GET `/review/progress/:card_id` 🔒
+Eén kaart inclusief voortgangsdata, in exact dezelfde rijvorm als een element van GET `/review/deck/:deck_id` (dezelfde `FlashCard.fromJson`). Bedoeld voor de save_progress-merge in de client: die heeft vóór het uploaden van een review-antwoord alleen het server-log (`repetitions`) van déze kaart nodig, niet het complete deck.
+
+**Response `200`:** één object (geen array) met dezelfde velden als `/review/deck/:deck_id`; voortgangsvelden zijn `null` als de kaart nog nooit geoefend is (of de voortgang gereset is).
+
+**Foutcodes:**
+- `403` — de kaart is niet van deze gebruiker
+- `404` — de kaart bestaat niet (of is verwijderd, of het id is geen geldig uuid)
+
+---
+
 ### POST `/review/progress`
 Sla de voortgang op na het beantwoorden van een kaart. Ondersteunt twee modi:
 
@@ -646,7 +657,7 @@ Sla de voortgang op na het beantwoorden van een kaart. Ondersteunt twee modi:
   "due_date": "2024-02-01",                 // verplicht — YYYY-MM-DD
   "repetitions": "...",                     // optioneel, standaard "" — intern formaat (max 2000 tekens), backend slaat op en geeft terug zonder te interpreteren
   "is_core": true,                          // optioneel — als weggelaten blijft de bestaande waarde behouden (eerste keer: false)
-  "client_updated_at": "2024-01-01T00:00:00.000Z"  // optioneel — ISO timestamp van de lokaal bekende versie
+  "client_updated_at": "2024-01-01T00:00:00.000Z"  // optioneel — echo van de server-versie waarop deze write gebaseerd is (zie conflictcheck)
 }
 ```
 Werkt als upsert. `is_core` wordt alleen overschreven als het expliciet meegestuurd wordt. Modus 1 broadcast **geen** WebSocket-event; andere apparaten halen de wijziging op via `/sync/changes`.
@@ -662,6 +673,8 @@ Werkt als upsert. `is_core` wordt alleen overschreven als het expliciet meegestu
 Werkt als update — past alleen `is_core` aan op een bestaand voortgangsrecord. Alle andere velden blijven ongewijzigd.
 
 Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie, wordt `409` teruggegeven. De conflict-check en de write zijn atomair (rij-lock in één transactie): twee apparaten die tegelijk schrijven kunnen elkaars voortgang niet meer stilzwijgend overschrijven.
+
+Stuur als `client_updated_at` de **server-versie** waarop de write gebaseerd is: de `progress_updated_at` uit GET `/review/progress/:card_id` (of `updated_at` uit een eerdere POST-response) — géén device-kloktijd. De check is daarmee een zuivere compare-and-swap (servertijd vs. servertijd, klokverschillen irrelevant): rij ongewijzigd → geaccepteerd; tussentijds door een ander device beschreven → `409` met `current`, waarna de client server- en lokale log merge't. Alleen weglaten bij een eerste write (nog geen voortgangsrecord om te bewaken). Het reviewmoment zelf hoeft niet apart meegestuurd te worden: dat zit op dagniveau in de `repetitions`-log.
 
 **Response `200`:** voortgangsobject
 ```json

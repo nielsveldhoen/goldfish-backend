@@ -191,6 +191,54 @@ router.get("/deck/:deck_id/scores", authMiddleware, async (req, res) => {
 
 
 // ========================
+// GET PROGRESS VAN ÉÉN KAART
+// ========================
+// Zelfde rijvorm als /review/deck/:deck_id, maar één kaart. Bestaat voor de
+// offline-merge in de client: die hoeft vóór een save_progress alleen het
+// server-log van déze kaart, niet het complete deck.
+router.get("/progress/:card_id", authMiddleware, async (req, res) => {
+  const { card_id } = req.params;
+
+  if (!isUUID(card_id)) {
+    return res.status(404).json({ error: "Card not found" });
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT c.id, c.deck_id, c.question, c.answer, c.created_at, c.updated_at,
+              d.user_id AS owner_id,
+              ucp.id AS progress_id, ucp.remote_score, ucp.stable_score, ucp.recent_score,
+              ucp.due_date, ucp.repetitions, ucp.is_core, ucp.updated_at AS progress_updated_at
+       FROM cards c
+       JOIN decks d ON c.deck_id = d.id
+       LEFT JOIN user_card_progress ucp
+         ON c.id = ucp.card_id
+         AND ucp.user_id = $1
+         AND ucp.deleted_at IS NULL
+       WHERE c.id = $2
+         AND c.deleted_at IS NULL
+         AND d.deleted_at IS NULL`,
+      [req.user.id, card_id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Card not found" });
+    }
+
+    const { owner_id, ...row } = result.rows[0];
+    if (owner_id !== req.user.id) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+
+    res.json(row);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ========================
 // UPSERT PROGRESS (frontend bepaalt alles)
 // ========================
 router.post("/progress", authMiddleware, async (req, res) => {
