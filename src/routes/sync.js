@@ -1,7 +1,7 @@
 import express from "express";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
-import { SYNC_RESYNC_HORIZON_DAYS } from "../config/retention.js";
+import { SYNC_RESYNC_HORIZON_DAYS, SYNC_WATERMARK_OVERLAP_SECONDS } from "../config/retention.js";
 
 const router = express.Router();
 
@@ -28,7 +28,10 @@ router.get("/changes", authMiddleware, async (req, res) => {
   const horizon = new Date(Date.now() - SYNC_RESYNC_HORIZON_DAYS * 864e5);
   if (!sinceDate || sinceDate < horizon) {
     try {
-      const { rows } = await pool.query(`SELECT NOW() AS now`);
+      const { rows } = await pool.query(
+        `SELECT NOW() - make_interval(secs => $1) AS now`,
+        [SYNC_WATERMARK_OVERLAP_SECONDS]
+      );
       return res.status(200).json({ full_resync: true, server_time: rows[0].now });
     } catch (err) {
       console.error(err);
@@ -37,8 +40,18 @@ router.get("/changes", authMiddleware, async (req, res) => {
   }
 
   try {
-    const [serverTimeResult, decksResult, cardsResult, progressResult] = await Promise.all([
-      pool.query(`SELECT NOW() AS now`),
+    // Watermerk éérst nemen (niet parallel aan de data-queries) en met een
+    // overlap-venster terugzetten: een write die commit tussen het
+    // data-snapshot en een later uitgelezen NOW() zou anders vóór het nieuwe
+    // watermerk vallen maar niet in de response zitten — en wordt dan bij de
+    // volgende delta permanent overgeslagen. Dubbel geleverde rijen door de
+    // overlap zijn onschadelijk: de client upsert idempotent.
+    const serverTimeResult = await pool.query(
+      `SELECT NOW() - make_interval(secs => $1) AS now`,
+      [SYNC_WATERMARK_OVERLAP_SECONDS]
+    );
+
+    const [decksResult, cardsResult, progressResult] = await Promise.all([
       pool.query(
         `SELECT d.*,
            (SELECT COUNT(*) FROM cards c

@@ -2,8 +2,17 @@ import express from "express";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { broadcast } from "../ws.js";
+import { LIMITS, invalidString, firstError } from "../utils/validate.js";
 
 const router = express.Router();
+
+// Gedeelde veldvalidatie voor create/update; geeft een 400-melding of null.
+function invalidCardFields({ question, answer }, { required }) {
+  return firstError(
+    invalidString(question, "question", LIMITS.QUESTION_MAX, { required }),
+    invalidString(answer, "answer", LIMITS.ANSWER_MAX, { required }),
+  );
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -38,6 +47,8 @@ router.get("/", authMiddleware, async (req, res) => {
     const values = [req.user.id];
 
     if (deck_id) {
+      // Malformed filter = onbekend deck: leeg resultaat i.p.v. 22P02 → 500.
+      if (!UUID_RE.test(deck_id)) return res.json([]);
       query += " AND c.deck_id = $2";
       values.push(deck_id);
     }
@@ -60,6 +71,11 @@ router.get("/", authMiddleware, async (req, res) => {
 // ========================
 router.get("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
+
+  // Malformed id zou anders als 22P02 in Postgres stranden (500 i.p.v. 404).
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Card not found" });
+  }
 
   try {
     const result = await pool.query(
@@ -94,6 +110,17 @@ router.post("/", authMiddleware, async (req, res) => {
 
   if (!deck_id || !question || !answer) {
     return res.status(400).json({ error: "Missing fields" });
+  }
+
+  // Malformed deck_id = onbekend deck (zelfde uitkomst als de ownercheck),
+  // maar zonder 22P02 → 500.
+  if (!UUID_RE.test(deck_id)) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
+
+  const invalid = invalidCardFields(req.body, { required: true });
+  if (invalid) {
+    return res.status(400).json({ error: invalid });
   }
 
   try {
@@ -139,9 +166,17 @@ router.post("/bulk", authMiddleware, async (req, res) => {
     return res.status(400).json({ error: `Too many cards (max ${MAX_BULK_CARDS})` });
   }
 
+  if (!UUID_RE.test(deck_id)) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
+
   for (const c of cards) {
-    if (!c.question || !c.answer) {
+    if (!c || !c.question || !c.answer) {
       return res.status(400).json({ error: "Each card requires question and answer" });
+    }
+    const invalid = invalidCardFields(c, { required: true });
+    if (invalid) {
+      return res.status(400).json({ error: invalid });
     }
   }
 
@@ -161,16 +196,24 @@ router.post("/bulk", authMiddleware, async (req, res) => {
 
     // Hard contract: de response-array heeft dezelfde volgorde als de
     // cards-array in de request — de client mapt op index zijn lokale
-    // temp-ids naar de server-ids.
-    const created = [];
-    for (const c of cards) {
-      const result = await client.query(
-        `INSERT INTO cards (deck_id, question, answer, created_at)
-         VALUES ($1, $2, $3, COALESCE($4, NOW())) RETURNING *`,
-        [deck_id, c.question, c.answer, parseCreatedAt(c.created_at)]
-      );
-      created.push(result.rows[0]);
-    }
+    // temp-ids naar de server-ids. Eén multi-row insert i.p.v. een insert per
+    // rij; unnest WITH ORDINALITY + ORDER BY houdt de invoegvolgorde (en dus
+    // de RETURNING-volgorde) gelijk aan de request-volgorde.
+    const result = await client.query(
+      `INSERT INTO cards (deck_id, question, answer, created_at)
+       SELECT $1, t.question, t.answer, COALESCE(t.created_at, NOW())
+       FROM unnest($2::text[], $3::text[], $4::timestamptz[])
+         WITH ORDINALITY AS t(question, answer, created_at, ord)
+       ORDER BY t.ord
+       RETURNING *`,
+      [
+        deck_id,
+        cards.map((c) => c.question),
+        cards.map((c) => c.answer),
+        cards.map((c) => parseCreatedAt(c.created_at)),
+      ]
+    );
+    const created = result.rows;
 
     await client.query("COMMIT");
 
@@ -224,7 +267,7 @@ router.post("/bulk-delete", authMiddleware, async (req, res) => {
          AND c.deck_id = d.id
          AND d.user_id = $2
          AND c.deleted_at IS NULL
-       RETURNING c.id, c.deck_id`,
+       RETURNING c.id, c.deck_id, c.deleted_at`,
       [ids, req.user.id]
     );
 
@@ -261,26 +304,44 @@ router.put("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
   const { question, answer, client_updated_at } = req.body;
 
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Card not found" });
+  }
+
+  const invalid = invalidCardFields(req.body, { required: false });
+  if (invalid) {
+    return res.status(400).json({ error: invalid });
+  }
+
+  // Check-then-write in één transactie met een rij-lock (FOR UPDATE OF c):
+  // twee devices kunnen anders tussen de 409-check en de UPDATE interleaven
+  // en elkaars write alsnog stilzwijgend overschrijven.
+  const client = await pool.connect();
   try {
-    const current = await pool.query(
+    await client.query("BEGIN");
+
+    const current = await client.query(
       `SELECT c.* FROM cards c
        JOIN decks d ON c.deck_id = d.id
        WHERE c.id = $1 AND d.user_id = $2
-         AND c.deleted_at IS NULL AND d.deleted_at IS NULL`,
+         AND c.deleted_at IS NULL AND d.deleted_at IS NULL
+       FOR UPDATE OF c`,
       [id, req.user.id]
     );
 
     if (current.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Card not found" });
     }
 
     const card = current.rows[0];
 
     if (client_updated_at && card.updated_at > new Date(client_updated_at)) {
+      await client.query("ROLLBACK");
       return res.status(409).json({ error: "stale_write", current: card });
     }
 
-    const result = await pool.query(
+    const result = await client.query(
       `UPDATE cards c
        SET question = $1,
            answer = $2
@@ -297,13 +358,18 @@ router.put("/:id", authMiddleware, async (req, res) => {
       ]
     );
 
+    await client.query("COMMIT");
+
     const updated = result.rows[0];
     broadcast(req.user.id, "card_updated", updated);
     res.json(updated);
 
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error(err);
     res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
   }
 });
 
@@ -313,6 +379,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
 // ========================
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
+
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Card not found" });
+  }
 
   const client = await pool.connect();
   try {
@@ -325,7 +395,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
          AND c.deck_id = d.id
          AND d.user_id = $2
          AND c.deleted_at IS NULL
-       RETURNING c.id, c.deck_id`,
+       RETURNING c.id, c.deck_id, c.deleted_at`,
       [id, req.user.id]
     );
 
@@ -344,8 +414,10 @@ router.delete("/:id", authMiddleware, async (req, res) => {
 
     await client.query("COMMIT");
 
-    const { deck_id } = result.rows[0];
-    broadcast(req.user.id, "card_deleted", { id, deck_id });
+    // deleted_at mee in de payload: broadcast() gebruikt de DB-timestamp als
+    // server_time, zodat WS- en REST-sync dezelfde klokbron delen.
+    const { deck_id, deleted_at } = result.rows[0];
+    broadcast(req.user.id, "card_deleted", { id, deck_id, deleted_at });
     res.json({ message: "Card deleted" });
 
   } catch (err) {

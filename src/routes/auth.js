@@ -6,6 +6,7 @@ import { pool } from "../db.js";
 import { generateToken } from "../utils/generateToken.js";
 import { sendVerificationEmail, mailer } from "../utils/sendVerificationEmail.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { LIMITS } from "../utils/validate.js";
 
 const router = express.Router();
 
@@ -42,6 +43,21 @@ router.post("/register", authLimiter, async (req, res) => {
 
   if (typeof password !== "string" || password.length < 8) {
     return res.status(400).json({ error: "Password must be at least 8 characters" });
+  }
+
+  // Bovengrens: argon2 over megabytes aan input is onnodig traag (DoS-vector
+  // binnen de 1MB body-limit).
+  if (password.length > LIMITS.PASSWORD_MAX) {
+    return res.status(400).json({ error: `Password too long (max ${LIMITS.PASSWORD_MAX} characters)` });
+  }
+
+  if (typeof email !== "string" || email.length > LIMITS.EMAIL_MAX) {
+    return res.status(400).json({ error: "Invalid email" });
+  }
+
+  if (username !== undefined && username !== null
+      && (typeof username !== "string" || username.length > LIMITS.USERNAME_MAX)) {
+    return res.status(400).json({ error: `Username too long (max ${LIMITS.USERNAME_MAX} characters)` });
   }
 
   const emailNormalized = email.toLowerCase().trim();
@@ -159,6 +175,13 @@ router.post("/login", authLimiter, async (req, res) => {
 
   if (!identifier || !password) {
     return res.status(400).json({ error: "Missing fields" });
+  }
+
+  // Ruimer dan PASSWORD_MAX zodat wachtwoorden van vóór die limiet blijven
+  // werken; alles daarboven kan nooit geldig zijn en hoeft argon2 niet in.
+  if (typeof password !== "string" || password.length > LIMITS.PASSWORD_LOGIN_MAX
+      || typeof identifier !== "string" || identifier.length > LIMITS.EMAIL_MAX) {
+    return res.status(401).json({ error: "Invalid credentials" });
   }
 
   const isEmail = identifier.includes("@");

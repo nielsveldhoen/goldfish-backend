@@ -119,6 +119,25 @@ export function createWsServer(server) {
   return wss;
 }
 
+// server_time moet uit dezelfde klokbron komen als de REST-sync (Postgres
+// NOW()), want de frontend schrijft beide naar dezelfde lastSync-cursor.
+// We nemen daarom de jongste updated_at/deleted_at uit de payload (dat zijn
+// DB-rijen) — minus 1 ms, omdat NOW() transactie-vast is: rijen die in
+// dezelfde transactie zijn mee-gewijzigd (bijv. cascade-soft-deletes) delen
+// exact deze timestamp en zouden bij een strikte `> since`-delta anders
+// buiten het venster vallen. Alleen als geen enkel item een timestamp
+// draagt valt dit terug op de Node-klok.
+function serverTimeFor(items) {
+  const times = items
+    .map((item) => item?.updated_at ?? item?.deleted_at)
+    .filter(Boolean)
+    .map((t) => new Date(t).getTime())
+    .filter((ms) => !Number.isNaN(ms));
+
+  if (times.length === 0) return new Date().toISOString();
+  return new Date(Math.max(...times) - 1).toISOString();
+}
+
 // Protocolcontract: payload is op de draad áltijd een array van objecten,
 // ook bij één item. Call sites mogen een los object of een array aanleveren;
 // een lege array wordt niet verstuurd.
@@ -132,7 +151,7 @@ export function broadcast(userId, type, payload, exclude = null) {
   const message = JSON.stringify({
     type,
     payload: items,
-    server_time: new Date().toISOString(),
+    server_time: serverTimeFor(items),
   });
 
   for (const socket of sockets) {

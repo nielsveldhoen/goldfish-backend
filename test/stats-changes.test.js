@@ -1,6 +1,8 @@
 // GET /v2/stats/changes — incrementele stats-delta met advance-only watermark,
 // in dezelfde stijl als /review/core en /sync/changes (filter updated_at > since,
-// server_time = DB NOW(), strikt `>`). Aparte cursor; loopt niet mee op /sync.
+// server_time = DB NOW() minus het overlap-venster, strikt `>`). Aparte cursor;
+// loopt niet mee op /sync. Rijen binnen het overlap-venster mogen dubbel
+// geleverd worden (idempotente upsert client-side); missen mag nooit.
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import request from "supertest";
@@ -106,7 +108,7 @@ describe("GET /v2/stats/changes", () => {
     assert.equal(res.body.daily_snapshots.length, 1);
   });
 
-  test("since = vorige server_time, geen wijzigingen → lege arrays", async () => {
+  test("since = vorige server_time → hooguit de rijen uit het overlap-venster opnieuw, daarbuiten lege arrays", async () => {
     const { token, deck } = await freshUserWithDeck();
     await postStats(token, deck.id, "2026-06-01");
 
@@ -114,10 +116,23 @@ describe("GET /v2/stats/changes", () => {
     assert.equal(first.status, 200);
     const watermark = first.body.server_time;
 
+    // Het watermerk staat bewust SYNC_WATERMARK_OVERLAP_SECONDS in het
+    // verleden: de zojuist geschreven rij valt daarbinnen en mag opnieuw
+    // meekomen (dubbel = idempotent; missen = dataverlies). Meer dan die
+    // ene rij mag het nooit zijn.
     const second = await getChanges(token, watermark);
     assert.equal(second.status, 200);
-    assert.deepEqual(second.body.deck_stats, []);
-    assert.deepEqual(second.body.daily_snapshots, []);
+    assert.ok(second.body.deck_stats.length <= 1, "hooguit de overlap-rij dubbel");
+    for (const row of second.body.deck_stats) assert.equal(row.deck_id, deck.id);
+    assert.ok(second.body.daily_snapshots.length <= 1);
+
+    // Een since ruim voorbij het schrijfmoment (buiten het overlap-venster)
+    // → gegarandeerd lege arrays.
+    const pastOverlap = new Date(Date.now() + 60_000).toISOString();
+    const third = await getChanges(token, pastOverlap);
+    assert.equal(third.status, 200);
+    assert.deepEqual(third.body.deck_stats, []);
+    assert.deepEqual(third.body.daily_snapshots, []);
   });
 
   test("ongeldige since → 400", async () => {

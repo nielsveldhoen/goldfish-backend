@@ -2,7 +2,8 @@ import express from "express";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { broadcast } from "../ws.js";
-import { SYNC_RESYNC_HORIZON_DAYS } from "../config/retention.js";
+import { SYNC_RESYNC_HORIZON_DAYS, SYNC_WATERMARK_OVERLAP_SECONDS } from "../config/retention.js";
+import { LIMITS, invalidString, invalidBoolean, invalidScore, invalidDate, firstError } from "../utils/validate.js";
 
 const router = express.Router();
 
@@ -210,8 +211,29 @@ router.post("/progress", authMiddleware, async (req, res) => {
     return res.status(400).json({ error: "Missing fields" });
   }
 
+  // Scores buiten smallint-range zouden anders als 22003 in Postgres
+  // stranden (500); repetitions/datums idem met andere foutcodes.
+  const invalid = firstError(
+    invalidScore(remote_score, "remote_score"),
+    invalidScore(stable_score, "stable_score"),
+    invalidScore(recent_score, "recent_score"),
+    invalidDate(due_date, "due_date"),
+    invalidString(repetitions, "repetitions", LIMITS.REPETITIONS_MAX),
+    invalidBoolean(is_core, "is_core"),
+    invalidDate(client_updated_at, "client_updated_at"),
+  );
+  if (invalid) {
+    return res.status(400).json({ error: invalid });
+  }
+
+  // Hele flow in één transactie met een rij-lock op het voortgangsrecord:
+  // zonder lock kunnen twee devices tussen de 409-check en de write
+  // interleaven en elkaars voortgang alsnog stilzwijgend overschrijven.
+  const client = await pool.connect();
   try {
-    const ownerCheck = await pool.query(
+    await client.query("BEGIN");
+
+    const ownerCheck = await client.query(
       `SELECT c.id FROM cards c
        JOIN decks d ON c.deck_id = d.id
        WHERE c.id = $1 AND d.user_id = $2
@@ -220,16 +242,21 @@ router.post("/progress", authMiddleware, async (req, res) => {
     );
 
     if (ownerCheck.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(403).json({ error: "Not allowed" });
     }
 
-    // Conflict check — fetch current progress record once for both modes
+    // Conflict check — lock het huidige voortgangsrecord voor beide modes.
+    // Bestaat het record nog niet, dan valt er niets te locken en vangt de
+    // unique constraint (ON CONFLICT) gelijktijdige inserts af.
     if (client_updated_at) {
-      const existing = await pool.query(
-        `SELECT * FROM user_card_progress WHERE card_id = $1 AND user_id = $2`,
+      const existing = await client.query(
+        `SELECT * FROM user_card_progress WHERE card_id = $1 AND user_id = $2
+         FOR UPDATE`,
         [card_id, req.user.id]
       );
       if (existing.rowCount > 0 && existing.rows[0].updated_at > new Date(client_updated_at)) {
+        await client.query("ROLLBACK");
         return res.status(409).json({ error: "stale_write", current: existing.rows[0] });
       }
     }
@@ -237,7 +264,7 @@ router.post("/progress", authMiddleware, async (req, res) => {
     let result;
 
     if (coreOnly) {
-      result = await pool.query(
+      result = await client.query(
         `UPDATE user_card_progress
          SET is_core = $1
          WHERE card_id = $2 AND user_id = $3 AND deleted_at IS NULL
@@ -246,14 +273,13 @@ router.post("/progress", authMiddleware, async (req, res) => {
       );
 
       if (result.rowCount === 0) {
+        await client.query("ROLLBACK");
         return res.status(404).json({ error: "No progress found for this card" });
       }
-
-      broadcast(req.user.id, "core_set", result.rows[0]);
     } else {
       const coreParam = is_core !== undefined ? is_core : null;
 
-      result = await pool.query(
+      result = await client.query(
         `INSERT INTO user_card_progress
          (user_id, card_id, remote_score, stable_score, recent_score, due_date, repetitions, is_core)
          VALUES ($1, $2, $3, $4, COALESCE($5::smallint, 0), $6, $7, COALESCE($8::boolean, false))
@@ -271,11 +297,20 @@ router.post("/progress", authMiddleware, async (req, res) => {
       );
     }
 
+    await client.query("COMMIT");
+
+    if (coreOnly) {
+      broadcast(req.user.id, "core_set", result.rows[0]);
+    }
+
     res.json(result.rows[0]);
 
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error(err);
     res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
   }
 });
 
@@ -452,7 +487,10 @@ router.get("/core", authMiddleware, async (req, res) => {
   const horizon = new Date(Date.now() - SYNC_RESYNC_HORIZON_DAYS * 864e5);
   if (sinceDate < horizon) {
     try {
-      const { rows } = await pool.query(`SELECT NOW() AS now`);
+      const { rows } = await pool.query(
+        `SELECT NOW() - make_interval(secs => $1) AS now`,
+        [SYNC_WATERMARK_OVERLAP_SECONDS]
+      );
       return res.status(200).json({ full_resync: true, server_time: rows[0].now });
     } catch (err) {
       console.error(err);
@@ -461,24 +499,31 @@ router.get("/core", authMiddleware, async (req, res) => {
   }
 
   try {
-    const [serverTimeResult, cardsResult] = await Promise.all([
-      pool.query(`SELECT NOW() AS now`),
-      pool.query(
-        `SELECT c.id, c.deck_id, c.question, c.answer, c.created_at, c.updated_at,
-                ucp.id AS progress_id, ucp.remote_score, ucp.stable_score, ucp.recent_score,
-                ucp.due_date, ucp.repetitions, ucp.is_core, ucp.updated_at AS progress_updated_at
-         FROM cards c
-         JOIN user_card_progress ucp ON c.id = ucp.card_id
-         JOIN decks d ON c.deck_id = d.id
-         WHERE ucp.user_id = $1
-           AND ucp.updated_at > $2
-           AND ucp.deleted_at IS NULL
-           AND c.deleted_at IS NULL
-           AND d.deleted_at IS NULL
-         ORDER BY ucp.updated_at ASC`,
-        [req.user.id, sinceDate]
-      ),
-    ]);
+    // Watermerk éérst nemen (niet parallel aan de data-query) en met een
+    // overlap-venster terugzetten: een write die commit tussen het
+    // data-snapshot en een later uitgelezen NOW() zou anders vóór het nieuwe
+    // watermerk vallen maar niet in de response zitten — en wordt dan bij de
+    // volgende delta permanent overgeslagen.
+    const serverTimeResult = await pool.query(
+      `SELECT NOW() - make_interval(secs => $1) AS now`,
+      [SYNC_WATERMARK_OVERLAP_SECONDS]
+    );
+
+    const cardsResult = await pool.query(
+      `SELECT c.id, c.deck_id, c.question, c.answer, c.created_at, c.updated_at,
+              ucp.id AS progress_id, ucp.remote_score, ucp.stable_score, ucp.recent_score,
+              ucp.due_date, ucp.repetitions, ucp.is_core, ucp.updated_at AS progress_updated_at
+       FROM cards c
+       JOIN user_card_progress ucp ON c.id = ucp.card_id
+       JOIN decks d ON c.deck_id = d.id
+       WHERE ucp.user_id = $1
+         AND ucp.updated_at > $2
+         AND ucp.deleted_at IS NULL
+         AND c.deleted_at IS NULL
+         AND d.deleted_at IS NULL
+       ORDER BY ucp.updated_at ASC`,
+      [req.user.id, sinceDate]
+    );
 
     res.json({
       cards: cardsResult.rows,

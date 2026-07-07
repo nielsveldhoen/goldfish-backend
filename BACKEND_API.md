@@ -69,9 +69,9 @@ Registreer een nieuwe gebruiker. Na registratie wordt een verificatiemail gestuu
 **Request body:**
 ```json
 {
-  "email": "user@example.com",
-  "password": "geheimwachtwoord",   // minimaal 8 tekens
-  "username": "niels"   // optioneel — wordt afgeleid van email als weggelaten
+  "email": "user@example.com",      // max 254 tekens
+  "password": "geheimwachtwoord",   // 8–128 tekens
+  "username": "niels"   // optioneel (max 64 tekens) — wordt afgeleid van email als weggelaten
 }
 ```
 
@@ -88,7 +88,7 @@ Registreer een nieuwe gebruiker. Na registratie wordt een verificatiemail gestuu
 > **Anti-enumeration:** bestaat het e-mailadres al, dan is de response *identiek* aan een geslaagde registratie (`200`) — er wordt dan geen account aangemaakt maar een "je hebt al een account"-mail gestuurd die naar de wachtwoord-reset wijst. De client kan een bestaand adres dus niet aan de response aflezen; dat is bewust.
 
 **Foutcodes:**
-- `400` — ontbrekende velden, wachtwoord korter dan 8 tekens, of username al bezet (`"Username already taken"`, alleen wanneer het e-mailadres nog vrij is)
+- `400` — ontbrekende velden, wachtwoord korter dan 8 of langer dan 128 tekens, e-mail/username boven de maximale lengte, of username al bezet (`"Username already taken"`, alleen wanneer het e-mailadres nog vrij is)
 
 ---
 
@@ -120,7 +120,7 @@ Login met email of username.
 
 **Foutcodes:**
 - `400` — ontbrekende velden
-- `401` — ongeldige inloggegevens
+- `401` — ongeldige inloggegevens (ook bij een identifier of wachtwoord ver boven de maximale lengte — zulke input kan nooit geldig zijn en wordt geweigerd zonder hash-verificatie)
 - `403` — e-mailadres nog niet geverifieerd
 
 ---
@@ -195,7 +195,7 @@ Vraag een wachtwoord-reset-link aan. Geeft altijd dezelfde response terug, ook a
 Browser-flow voor de reset-link uit de mail — de client hoeft hier niets mee, maar voor de volledigheid: `GET ?token=...` toont een HTML-formulier; de `POST` (formulier of JSON `{ "token", "password" }`) voert de reset uit. Deze routes staan **buiten** het `/v2`-prefix en buiten de client-versiegate, omdat een browser geen `X-Client-Build` meestuurt.
 
 Een geslaagde reset:
-- zet het nieuwe wachtwoord (minimaal 8 tekens),
+- zet het nieuwe wachtwoord (8–128 tekens),
 - zet `email_verified = true` (de reset bewijst bezit van de mailbox),
 - **trekt alle bestaande JWT's van de gebruiker in** — elk apparaat krijgt op zijn eerstvolgende call een `401` en moet opnieuw inloggen.
 
@@ -263,7 +263,7 @@ Eén deck ophalen. Soft-deleted decks geven een 404.
 
 **Response `200`:** zie hierboven (enkel object)
 **Foutcodes:**
-- `404` — deck niet gevonden (of niet van deze gebruiker)
+- `404` — deck niet gevonden (of niet van deze gebruiker, of malformed id)
 
 ---
 
@@ -273,11 +273,11 @@ Nieuw deck aanmaken.
 **Request body:**
 ```json
 {
-  "title": "Frans vocabulaire",       // verplicht
-  "description": "Basiswoorden",      // optioneel
+  "title": "Frans vocabulaire",       // verplicht, max 200 tekens
+  "description": "Basiswoorden",      // optioneel, max 2000 tekens
   "is_public": false,                 // optioneel, standaard false
   "inactive": false,                  // optioneel, standaard false
-  "tags": ["frans", "school"]         // optioneel, standaard []
+  "tags": ["frans", "school"]         // optioneel, standaard [] — max 50 tags van elk max 100 tekens
 }
 ```
 
@@ -298,7 +298,7 @@ Nieuw deck aanmaken.
 ```
 
 **Foutcodes:**
-- `400` — titel ontbreekt
+- `400` — titel ontbreekt, veld boven de maximale lengte, of veld van het verkeerde type (tags geen string-array, is_public/inactive geen boolean)
 
 ---
 
@@ -319,12 +319,13 @@ Deck bijwerken. Alleen meegestuurde velden worden bijgewerkt — niet-meegestuur
 
 `inactive` (boolean) wordt — net als `title`/`tags` — alleen bijgewerkt als het is meegestuurd; ontbreekt het, dan blijft de huidige waarde staan. De `409`-`current` bevat het volledige deck-object, inclusief `inactive`.
 
-Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie, wordt `409` teruggegeven.
+Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie, wordt `409` teruggegeven. De conflict-check en de update zijn atomair (rij-lock in één transactie): twee apparaten die tegelijk schrijven kunnen elkaars write niet meer stilzwijgend overschrijven.
 
 **Response `200`:** bijgewerkt deck-object
 
 **Foutcodes:**
-- `404` — deck niet gevonden
+- `400` — veld boven de maximale lengte of van het verkeerde type (zelfde limieten als `POST /decks`)
+- `404` — deck niet gevonden (ook bij een malformed id)
 - `409` — conflict: de server heeft een nieuwere versie
   ```json
   { "error": "stale_write", "current": { /* huidig deck-object */ } }
@@ -368,7 +369,7 @@ Meerdere decks tegelijk soft-deleten (max **100** ids per request), in één tra
 ```
 `ids` bevat de ids die daadwerkelijk verwijderd zijn (genegeerde ids ontbreken).
 
-**Realtime:** er wordt **één** `deck_deleted`-event gebroadcast met als payload een array van `{ "id": "uuid" }`-objecten voor alle daadwerkelijk verwijderde decks. Genegeerde ids zitten niet in de array; wordt er niets verwijderd, dan komt er geen event.
+**Realtime:** er wordt **één** `deck_deleted`-event gebroadcast met als payload een array van `{ "id": "uuid", "deleted_at": "…" }`-objecten voor alle daadwerkelijk verwijderde decks. Genegeerde ids zitten niet in de array; wordt er niets verwijderd, dan komt er geen event.
 
 **Foutcodes:**
 - `400` — `deck_ids` ontbreekt, is leeg, of bevat meer dan 100 ids
@@ -407,7 +408,7 @@ Alle kaarten van de gebruiker. Optioneel filteren op deck. Soft-deleted kaarten 
 
 **Response `200`:** zie hierboven (enkel object)
 **Foutcodes:**
-- `404` — kaart niet gevonden
+- `404` — kaart niet gevonden (of malformed id)
 
 ---
 
@@ -418,8 +419,8 @@ Nieuwe kaart aanmaken.
 ```json
 {
   "deck_id": "uuid",            // verplicht
-  "question": "Wat is appel?",  // verplicht
-  "answer": "pomme",            // verplicht
+  "question": "Wat is appel?",  // verplicht, max 10000 tekens
+  "answer": "pomme",            // verplicht, max 10000 tekens
   "created_at": "2026-01-15T09:30:00.000Z"  // optioneel — ISO timestamp, voor offline aangemaakte kaarten
 }
 ```
@@ -429,8 +430,8 @@ Nieuwe kaart aanmaken.
 **Response `201`:** kaart-object
 
 **Foutcodes:**
-- `400` — ontbrekende velden
-- `403` — deck is niet van deze gebruiker
+- `400` — ontbrekende velden of vraag/antwoord boven de maximale lengte
+- `403` — deck is niet van deze gebruiker (ook bij een malformed deck_id)
 
 ---
 
@@ -455,8 +456,8 @@ Per kaart is `created_at` optioneel, met exact dezelfde semantiek als bij `POST 
 > **Volgorde-garantie (hard contract):** de response-array heeft altijd exact dezelfde volgorde als de `cards`-array in de request. De client mag dus op index zijn lokale temp-ids aan de server-ids koppelen.
 
 **Foutcodes:**
-- `400` — ontbrekende velden, lege cards-array, of meer dan 500 kaarten
-- `403` — deck is niet van deze gebruiker
+- `400` — ontbrekende velden, lege cards-array, meer dan 500 kaarten, of een vraag/antwoord boven de maximale lengte (max 10000 tekens; de hele batch wordt dan geweigerd)
+- `403` — deck is niet van deze gebruiker (ook bij een malformed deck_id)
 
 ---
 
@@ -472,12 +473,13 @@ Kaart bijwerken. Alleen meegestuurde velden worden bijgewerkt.
 }
 ```
 
-Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie, wordt `409` teruggegeven.
+Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie, wordt `409` teruggegeven. De conflict-check en de update zijn atomair (rij-lock in één transactie): twee apparaten die tegelijk schrijven kunnen elkaars write niet meer stilzwijgend overschrijven.
 
 **Response `200`:** bijgewerkt kaart-object
 
 **Foutcodes:**
-- `404` — kaart niet gevonden
+- `400` — vraag/antwoord boven de maximale lengte (max 10000 tekens)
+- `404` — kaart niet gevonden (ook bij een malformed id)
 - `409` — conflict: de server heeft een nieuwere versie
   ```json
   { "error": "stale_write", "current": { /* huidig kaart-object */ } }
@@ -521,7 +523,7 @@ Meerdere kaarten tegelijk soft-deleten (max **500** ids per request), in één t
 ```
 `ids` bevat de ids die daadwerkelijk verwijderd zijn (genegeerde ids ontbreken).
 
-**Realtime:** er wordt **één** `card_deleted`-event gebroadcast met als payload een array van `{ "id": "uuid", "deck_id": "uuid" }`-objecten voor alle daadwerkelijk verwijderde kaarten. Genegeerde ids zitten niet in de array; wordt er niets verwijderd, dan komt er geen event.
+**Realtime:** er wordt **één** `card_deleted`-event gebroadcast met als payload een array van `{ "id": "uuid", "deck_id": "uuid", "deleted_at": "…" }`-objecten voor alle daadwerkelijk verwijderde kaarten. Genegeerde ids zitten niet in de array; wordt er niets verwijderd, dan komt er geen event.
 
 **Foutcodes:**
 - `400` — `card_ids` ontbreekt, is leeg, of bevat meer dan 500 ids
@@ -642,7 +644,7 @@ Sla de voortgang op na het beantwoorden van een kaart. Ondersteunt twee modi:
   "stable_score": 3,                        // optioneel, standaard 0 — short-term (stable) score
   "recent_score": 1,                        // optioneel — weggelaten = bestaande waarde blijft staan
   "due_date": "2024-02-01",                 // verplicht — YYYY-MM-DD
-  "repetitions": "...",                     // optioneel, standaard "" — intern formaat, backend slaat op en geeft terug zonder te interpreteren
+  "repetitions": "...",                     // optioneel, standaard "" — intern formaat (max 2000 tekens), backend slaat op en geeft terug zonder te interpreteren
   "is_core": true,                          // optioneel — als weggelaten blijft de bestaande waarde behouden (eerste keer: false)
   "client_updated_at": "2024-01-01T00:00:00.000Z"  // optioneel — ISO timestamp van de lokaal bekende versie
 }
@@ -659,7 +661,7 @@ Werkt als upsert. `is_core` wordt alleen overschreven als het expliciet meegestu
 ```
 Werkt als update — past alleen `is_core` aan op een bestaand voortgangsrecord. Alle andere velden blijven ongewijzigd.
 
-Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie, wordt `409` teruggegeven.
+Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie, wordt `409` teruggegeven. De conflict-check en de write zijn atomair (rij-lock in één transactie): twee apparaten die tegelijk schrijven kunnen elkaars voortgang niet meer stilzwijgend overschrijven.
 
 **Response `200`:** voortgangsobject
 ```json
@@ -678,9 +680,9 @@ Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie
 ```
 
 **Foutcodes:**
-- `400` — ontbrekende velden
+- `400` — ontbrekende of ongeldige velden: scores moeten integers binnen de smallint-range zijn, `due_date`/`client_updated_at` geldige datums, `repetitions` max 2000 tekens, `is_core` een boolean
 - `403` — kaart is niet van deze gebruiker
-- `404` — (modus 2) nog geen voortgangsrecord voor deze kaart
+- `404` — kaart niet gevonden (malformed card_id), of (modus 2) nog geen voortgangsrecord voor deze kaart
 - `409` — conflict: de server heeft een nieuwere versie
   ```json
   { "error": "stale_write", "current": { /* huidig voortgangsobject */ } }
@@ -781,6 +783,8 @@ De kaart-objecten hebben exact dezelfde veldnamen als `/review/due` en `/review/
 }
 ```
 Geen wijzigingen sinds `since` → `"cards": []` met status `200`, plus de actuele `server_time`. De client stuurt `server_time` mee als `since` bij de volgende call. Filter en `server_time` gebruiken dezelfde tijdsbron (DB-klok), zodat er geen wijzigingen tussen twee calls in wegvallen.
+
+> **Overlap-venster:** `server_time` wordt vóór de data-query genomen en staat bewust enkele seconden (default 5, `SYNC_WATERMARK_OVERLAP_SECONDS`) in het verleden. Writes die rond het query-moment committen vallen daardoor gegarandeerd binnen het volgende delta-venster — maar rijen uit die laatste seconden kunnen dus **dubbel** geleverd worden. De client moet deltas idempotent verwerken (upsert op id); dat deed hij al.
 
 **Full-resync-signaal:** net als `/sync/changes` heeft dit endpoint een resync-horizon (`SYNC_RESYNC_HORIZON_DAYS`, default 75 d). `/review/core` signaleert core-verwijderingen via `is_core = false`-flips; is `since` ouder dan de horizon — of ontbreekt/leeg (epoch, dus eerste sync) — dan kan zo'n flip al gepurged zijn. De server geeft dan **geen delta** maar:
 
@@ -889,6 +893,8 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
 
 > **Progress-resets:** een progress-record met `deleted_at != null` betekent dat de voortgang van die kaart gereset is (via DELETE `/review/progress/:card_id`, mogelijk op een ander apparaat). Verwijder dan het lokale voortgangsrecord; de kaart telt weer als nieuw.
 
+> **Overlap-venster:** `server_time` wordt vóór de data-queries genomen en staat bewust enkele seconden (default 5, `SYNC_WATERMARK_OVERLAP_SECONDS`) in het verleden. Writes die rond het query-moment committen vallen daardoor gegarandeerd binnen het volgende delta-venster — maar rijen uit die laatste seconden kunnen dus **dubbel** geleverd worden. De client moet deltas idempotent verwerken (upsert op id); dat deed hij al.
+
 **Foutcodes:**
 - `400` — `since` meegegeven maar geen geldig ISO 8601-formaat
 
@@ -989,9 +995,11 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
 
 `total_cards`/`total_core_cards` op `deck_stats` zijn de per-deck deckgroottes op die datum; ze zijn `null` zolang ze nog nooit gezet zijn (geen backfill). Wordt `daily_snapshot` weggelaten, dan blijft `user_daily_snapshot` ongemoeid en is `daily_snapshot` in de response `null`.
 
+**Validatie:** de tellervelden (`cards_practiced`, `cards_correct_first_try`, `core_*`, `*_today`) moeten niet-negatieve integers zijn (max 10000 per request) — negatieve of absurde deltas zouden de cumulatieve tellers permanent corrumperen. `total_cards`/`total_core_cards` zijn niet-negatieve integers; de `avg_*`-velden eindige getallen; `date` een geldige datum.
+
 **Foutcodes:**
-- `400` — ontbrekende velden (`date`, `deck_id` of `deck_delta`)
-- `403` — deck is niet van deze gebruiker
+- `400` — ontbrekende velden (`date`, `deck_id` of `deck_delta`) of een veld dat de validatie hierboven niet haalt
+- `403` — deck is niet van deze gebruiker (ook bij een malformed deck_id)
 
 ---
 
@@ -1056,6 +1064,8 @@ De rij-objecten hebben exact dezelfde veldnamen als `/stats/deck/:deckId` (`deck
 ```
 Geen wijzigingen sinds `since` → `"deck_stats": []` en `"daily_snapshots": []` met status `200`, plus de actuele `server_time`. De client stuurt `server_time` mee als `since` bij de volgende call. Filter en `server_time` gebruiken dezelfde tijdsbron (DB-klok); `updated_at` wordt server-side bij elke wijziging bijgewerkt, dus de client-klok is nooit de bron van het watermerk.
 
+> **Overlap-venster:** `server_time` wordt vóór de data-queries genomen en staat bewust enkele seconden (default 5, `SYNC_WATERMARK_OVERLAP_SECONDS`) in het verleden. Writes die rond het query-moment committen vallen daardoor gegarandeerd binnen het volgende delta-venster — maar rijen uit die laatste seconden kunnen dus **dubbel** geleverd worden. De client moet deltas idempotent verwerken (upsert op id); dat deed hij al.
+
 **Foutcodes:**
 - `400` — `since` meegegeven maar geen geldige ISO 8601
 
@@ -1104,7 +1114,7 @@ Alleen **levende** (niet-verwijderde) decks van de ingelogde gebruiker tellen me
 ---
 
 ### GET `/stats/deck/:deckId`
-Alle dagelijkse statistieken voor één deck, gesorteerd van nieuw naar oud. Meerdere decks nodig (bijv. dashboard)? Gebruik `GET /stats/decks` — één request voor alles.
+Alle dagelijkse statistieken voor één deck, gesorteerd van nieuw naar oud. Meerdere decks nodig (bijv. dashboard)? Gebruik `GET /stats/decks` — één request voor alles. Een malformed of onbekend deck-id geeft een lege array.
 
 **Response `200`:**
 ```json
@@ -1188,16 +1198,18 @@ Alle berichten zijn JSON. `payload` is **altijd een array van objecten**, ook al
 
 Bulk-endpoints sturen dus **één** event met alle items in de array (geen event per item). Een lege array wordt nooit verstuurd: als een bulk-delete niets verwijdert, komt er geen event.
 
+> **`server_time`** komt uit dezelfde klokbron als de REST-sync (de Postgres-`updated_at`/`deleted_at` van de payload-rijen, jongste van de batch, minus 1 ms), zodat de client hem veilig naar dezelfde `lastSync`-cursor kan schrijven als de `server_time` van `/sync/changes`. De 1 ms-marge zorgt dat rijen die in dezelfde DB-transactie zijn mee-gewijzigd (bijv. cascade-gesoftdeletete voortgang bij een deck-delete, exact dezelfde timestamp) bij de volgende delta-sync nog binnen het `> since`-venster vallen.
+
 ### Eventtypen
 
 | `type`            | Trigger                              | `payload` (array van …)          |
 |-------------------|--------------------------------------|----------------------------------|
 | `deck_created`    | POST `/decks`                        | volledige deck-objecten          |
 | `deck_updated`    | PUT `/decks/:id`                     | bijgewerkte deck-objecten        |
-| `deck_deleted`    | DELETE `/decks/:id` of POST `/decks/bulk-delete` (één event voor de hele batch) | `{ "id": "uuid" }` |
+| `deck_deleted`    | DELETE `/decks/:id` of POST `/decks/bulk-delete` (één event voor de hele batch) | `{ "id": "uuid", "deleted_at": "…" }` |
 | `card_created`    | POST `/cards` of POST `/cards/bulk` (één event voor de hele batch) | volledige kaart-objecten |
 | `card_updated`    | PUT `/cards/:id`                     | bijgewerkte kaart-objecten       |
-| `card_deleted`    | DELETE `/cards/:id` of POST `/cards/bulk-delete` (één event voor de hele batch) | `{ "id": "uuid", "deck_id": "uuid" }` |
+| `card_deleted`    | DELETE `/cards/:id` of POST `/cards/bulk-delete` (één event voor de hele batch) | `{ "id": "uuid", "deck_id": "uuid", "deleted_at": "…" }` |
 | `core_set`        | POST `/review/progress` (modus 2)    | voortgangsobjecten               |
 | `progress_deleted`| DELETE `/review/progress/:card_id`   | voortgangsobjecten (met `deleted_at` gezet) |
 

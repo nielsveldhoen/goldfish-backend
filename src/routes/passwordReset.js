@@ -3,6 +3,7 @@ import argon2 from "argon2";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 import { pool } from "../db.js";
+import { LIMITS } from "../utils/validate.js";
 
 // Browser-flow voor de wachtwoord-reset. De link uit de mail
 // (APP_URL/auth/reset-password?token=...) opent in een browser, dus deze
@@ -142,6 +143,12 @@ router.post("/", resetLimiter, async (req, res) => {
 
   if (typeof password !== "string" || password.length < 8) {
     return fail(400, formPage(token, "Wachtwoord moet minimaal 8 tekens zijn."), "Password must be at least 8 characters");
+  }
+
+  // Zelfde bovengrens als bij registratie: argon2 over enorme input is
+  // onnodig traag.
+  if (password.length > LIMITS.PASSWORD_MAX) {
+    return fail(400, formPage(token, `Wachtwoord mag maximaal ${LIMITS.PASSWORD_MAX} tekens zijn.`), `Password too long (max ${LIMITS.PASSWORD_MAX} characters)`);
   }
 
   // `confirm` komt alleen van het browserformulier; JSON-callers laten hem weg.

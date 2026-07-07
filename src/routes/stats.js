@@ -1,8 +1,23 @@
 import express from "express";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { SYNC_WATERMARK_OVERLAP_SECONDS } from "../config/retention.js";
+import { invalidCounterDelta, invalidTotal, invalidAvg, invalidDate, firstError } from "../utils/validate.js";
 
 const router = express.Router();
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Valideert de tellers/snapshotvelden van een delta- of snapshot-object.
+// Tellers mogen niet negatief of absurd groot zijn: ze worden cumulatief
+// opgeteld en een corrupte delta vervuilt de tellers permanent.
+function invalidStatsFields(obj, counterKeys, totalKeys, avgKeys) {
+  return firstError(
+    ...counterKeys.map((k) => invalidCounterDelta(obj[k], k)),
+    ...totalKeys.map((k) => invalidTotal(obj[k], k)),
+    ...avgKeys.map((k) => invalidAvg(obj[k], k)),
+  );
+}
 
 
 // ========================
@@ -16,6 +31,48 @@ router.post("/update", authMiddleware, async (req, res) => {
   // optioneel geworden. deck_delta blijft verplicht — dat is de primaire schrijfweg.
   if (!date || !deck_id || !deck_delta) {
     return res.status(400).json({ error: "Missing fields" });
+  }
+
+  // Malformed deck_id = onbekend deck (zelfde uitkomst als de ownercheck),
+  // maar zonder 22P02 → 500.
+  if (typeof deck_id !== "string" || !UUID_RE.test(deck_id)) {
+    return res.status(403).json({ error: "Not allowed" });
+  }
+
+  const invalidInput = firstError(
+    invalidDate(date, "date", { required: true }),
+    typeof deck_delta === "object" && !Array.isArray(deck_delta)
+      ? invalidStatsFields(
+          deck_delta,
+          ["cards_practiced", "cards_correct_first_try", "core_cards_practiced", "core_correct_first_try"],
+          ["total_cards", "total_core_cards"],
+          ["avg_remote_score", "avg_stable_score", "avg_recent_score",
+           "avg_core_remote_score", "avg_core_stable_score", "avg_core_recent_score"],
+        )
+      : "deck_delta must be an object",
+    daily_delta === undefined || daily_delta === null
+      ? null
+      : typeof daily_delta === "object" && !Array.isArray(daily_delta)
+        ? invalidStatsFields(
+            daily_delta,
+            ["cards_practiced_today", "correct_first_try_today", "core_practiced_today", "core_correct_first_try_today"],
+            [], [],
+          )
+        : "daily_delta must be an object",
+    daily_snapshot === undefined || daily_snapshot === null
+      ? null
+      : typeof daily_snapshot === "object" && !Array.isArray(daily_snapshot)
+        ? invalidStatsFields(
+            daily_snapshot,
+            [],
+            ["total_cards", "total_core_cards"],
+            ["avg_remote_score", "avg_stable_score", "avg_recent_score",
+             "avg_core_remote_score", "avg_core_stable_score", "avg_core_recent_score"],
+          )
+        : "daily_snapshot must be an object",
+  );
+  if (invalidInput) {
+    return res.status(400).json({ error: invalidInput });
   }
 
   const {
@@ -160,8 +217,17 @@ router.get("/changes", authMiddleware, async (req, res) => {
   }
 
   try {
-    const [serverTimeResult, deckStatsResult, snapshotsResult] = await Promise.all([
-      pool.query(`SELECT NOW() AS now`),
+    // Watermerk éérst nemen (niet parallel aan de data-queries) en met een
+    // overlap-venster terugzetten: een write die commit tussen het
+    // data-snapshot en een later uitgelezen NOW() zou anders vóór het nieuwe
+    // watermerk vallen maar niet in de response zitten — en wordt dan bij de
+    // volgende delta permanent overgeslagen.
+    const serverTimeResult = await pool.query(
+      `SELECT NOW() - make_interval(secs => $1) AS now`,
+      [SYNC_WATERMARK_OVERLAP_SECONDS]
+    );
+
+    const [deckStatsResult, snapshotsResult] = await Promise.all([
       pool.query(
         `SELECT * FROM deck_stats
          WHERE user_id = $1 AND updated_at > $2
@@ -198,8 +264,6 @@ router.get("/changes", authMiddleware, async (req, res) => {
 // levende (niet-verwijderde) decks. Elk gevraagd/levend deck krijgt een key,
 // óók zonder stats-rijen (lege array) — zo kan de client "geen stats" van
 // "niet gevraagd" onderscheiden.
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 router.get("/decks", authMiddleware, async (req, res) => {
   const { ids } = req.query;
 
@@ -247,6 +311,12 @@ router.get("/decks", authMiddleware, async (req, res) => {
 // ========================
 router.get("/deck/:deckId", authMiddleware, async (req, res) => {
   const { deckId } = req.params;
+
+  // Malformed id = onbekend deck: zelfde lege lijst als een geldig-maar-
+  // onbekend id, i.p.v. een 22P02 → 500.
+  if (!UUID_RE.test(deckId)) {
+    return res.json([]);
+  }
 
   try {
     const result = await pool.query(

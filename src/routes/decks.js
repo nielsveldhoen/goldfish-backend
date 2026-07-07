@@ -2,10 +2,22 @@ import express from "express";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { broadcast } from "../ws.js";
+import { LIMITS, invalidString, invalidBoolean, invalidTags, firstError } from "../utils/validate.js";
 
 const router = express.Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Gedeelde veldvalidatie voor POST en PUT; geeft een 400-melding of null.
+function invalidDeckFields({ title, description, tags, is_public, inactive }, { titleRequired }) {
+  return firstError(
+    invalidString(title, "title", LIMITS.TITLE_MAX, { required: titleRequired }),
+    invalidString(description, "description", LIMITS.DESCRIPTION_MAX),
+    invalidTags(tags),
+    invalidBoolean(is_public, "is_public"),
+    invalidBoolean(inactive, "inactive"),
+  );
+}
 
 // Maximale batchgrootte voor /bulk-delete.
 const MAX_BULK_DECKS = 100;
@@ -37,6 +49,11 @@ router.get("/", authMiddleware, async (req, res) => {
 router.get("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
 
+  // Malformed id zou anders als 22P02 in Postgres stranden (500 i.p.v. 404).
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Deck not found" });
+  }
+
   try {
     const result = await pool.query(
       `SELECT * FROM decks
@@ -66,6 +83,11 @@ router.post("/", authMiddleware, async (req, res) => {
 
   if (!title) {
     return res.status(400).json({ error: "Title is required" });
+  }
+
+  const invalid = invalidDeckFields(req.body, { titleRequired: true });
+  if (invalid) {
+    return res.status(400).json({ error: invalid });
   }
 
   try {
@@ -101,23 +123,41 @@ router.put("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
   const { title, description, is_public, tags, inactive, client_updated_at } = req.body;
 
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Deck not found" });
+  }
+
+  const invalid = invalidDeckFields(req.body, { titleRequired: false });
+  if (invalid) {
+    return res.status(400).json({ error: invalid });
+  }
+
+  // Check-then-write in één transactie met een rij-lock: twee devices die
+  // tegelijk schrijven kunnen anders tussen de 409-check en de UPDATE
+  // interleaven en elkaars write alsnog stilzwijgend overschrijven.
+  const client = await pool.connect();
   try {
-    const current = await pool.query(
-      `SELECT * FROM decks WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+    await client.query("BEGIN");
+
+    const current = await client.query(
+      `SELECT * FROM decks WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+       FOR UPDATE`,
       [id, req.user.id]
     );
 
     if (current.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Deck not found" });
     }
 
     const deck = current.rows[0];
 
     if (client_updated_at && deck.updated_at > new Date(client_updated_at)) {
+      await client.query("ROLLBACK");
       return res.status(409).json({ error: "stale_write", current: deck });
     }
 
-    const result = await pool.query(
+    const result = await client.query(
       `UPDATE decks
        SET title = $1,
            description = $2,
@@ -137,13 +177,18 @@ router.put("/:id", authMiddleware, async (req, res) => {
       ]
     );
 
+    await client.query("COMMIT");
+
     const updated = result.rows[0];
     broadcast(req.user.id, "deck_updated", updated);
     res.json(updated);
 
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error(err);
     res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
   }
 });
 
@@ -154,6 +199,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
 
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Deck not found" });
+  }
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -161,7 +210,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
     const result = await client.query(
       `UPDATE decks SET deleted_at = NOW()
        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-       RETURNING id`,
+       RETURNING id, deleted_at`,
       [id, req.user.id]
     );
 
@@ -182,7 +231,9 @@ router.delete("/:id", authMiddleware, async (req, res) => {
 
     await client.query("COMMIT");
 
-    broadcast(req.user.id, "deck_deleted", { id });
+    // deleted_at mee in de payload: broadcast() gebruikt de DB-timestamp als
+    // server_time, zodat WS- en REST-sync dezelfde klokbron delen.
+    broadcast(req.user.id, "deck_deleted", { id, deleted_at: result.rows[0].deleted_at });
     res.json({ message: "Deck deleted" });
 
   } catch (err) {
@@ -228,7 +279,7 @@ router.post("/bulk-delete", authMiddleware, async (req, res) => {
     const result = await client.query(
       `UPDATE decks SET deleted_at = NOW()
        WHERE id = ANY($1::uuid[]) AND user_id = $2 AND deleted_at IS NULL
-       RETURNING id`,
+       RETURNING id, deleted_at`,
       [ids, req.user.id]
     );
 

@@ -28,6 +28,14 @@ function positiveIntFromEnv(name, def) {
 export const TOMBSTONE_RETENTION_DAYS = positiveIntFromEnv("TOMBSTONE_RETENTION_DAYS", 90);
 export const SYNC_RESYNC_HORIZON_DAYS = positiveIntFromEnv("SYNC_RESYNC_HORIZON_DAYS", 75);
 
+// Overlap-venster voor de delta-sync-watermerken (/sync/changes, /stats/changes,
+// /review/core). Het teruggegeven server_time (= volgende `since` van de client)
+// wordt dit aantal seconden vóór het query-moment gezet. Zo vallen writes die
+// rond het snapshot committen — of transacties die vóór het watermerk startten
+// maar erna committen — bij de volgende delta alsnog binnen het venster.
+// Dubbel geleverde rijen zijn onschadelijk: de client upsert idempotent.
+export const SYNC_WATERMARK_OVERLAP_SECONDS = positiveIntFromEnv("SYNC_WATERMARK_OVERLAP_SECONDS", 5);
+
 // Pure, testbare invariant-check. Gooit als de horizon niet strikt kleiner is
 // dan de retentie.
 export function assertRetentionInvariant(horizonDays, retentionDays) {
