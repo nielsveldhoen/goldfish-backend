@@ -1194,6 +1194,78 @@ Alle dagelijkse snapshots van de gebruiker, gesorteerd van nieuw naar oud. Gebru
 
 ---
 
+## Contacten (`/contacts`) 🔒
+
+Vrienden op e-mailadres: je stuurt een uitnodiging, de ander accepteert of wijst af. Zolang niet geaccepteerd staat de relatie "in behandeling"; bij afwijzen verdwijnt hij aan beide kanten; bij accepteren zijn beide personen elkaars contact.
+
+**Online-only — staat LOS van de sync-delta.** Contacten zitten **niet** in `GET /sync/changes`, kennen **geen** `deleted_at`/soft-delete en **geen** sync-watermerk. Een verwijderde relatie wordt **hard verwijderd**. De client leest de lijst via `GET /contacts` (bij opstart/hervatten) en verwerkt tussentijdse mutaties via de WebSocket-events `contact_invited` / `contact_accepted` / `contact_rejected`. Voor `contact_`-events schuift de client zijn sync-cursor bewust **niet** door.
+
+### Het contact-object
+
+Overal waar een contact wordt teruggegeven of ge-pusht, is dit het object, **berekend t.o.v. de gebruiker die het ontvangt**:
+
+```json
+{
+  "id": "uuid",                 // relatie-id — hiermee doet de client accept/delete
+  "user_id": "uuid",            // de ANDERE gebruiker (t.o.v. de ontvanger)
+  "username": "niels",          // van die andere gebruiker
+  "email": "niels@example.com", // van die andere gebruiker
+  "status": "pending_outgoing", // zie afleiding
+  "created_at": "2026-07-09T12:00:00.000Z"
+}
+```
+
+**Afleiding van `status`** voor gebruiker U die het object ontvangt:
+- relatie `accepted` → `"accepted"`
+- relatie `pending` en U heeft uitgenodigd → `"pending_outgoing"`
+- relatie `pending` en U moet nog reageren → `"pending_incoming"`
+
+`user_id`/`username`/`email` zijn altijd die van de **andere** persoon dan U. Het relatie-`id` is voor beide gebruikers hetzelfde.
+
+### GET `/contacts`
+Alle relaties waarin de ingelogde gebruiker betrokken is (als uitnodiger óf uitgenodigde). Elk item als het contact-object hierboven, berekend t.o.v. de ingelogde gebruiker.
+
+**Response `200`:** array van contact-objecten (leeg → `[]`).
+
+### POST `/contacts`
+Nodig iemand uit op e-mailadres.
+
+**Request body:** `{ "email": "iemand@example.com" }`
+
+Verwerking:
+1. Zoek een gebruiker met dit e-mailadres (**case-insensitief**). Niet gevonden → `404` `{ "error": "user_not_found" }`.
+2. Is dat de ingelogde gebruiker zelf → `400` `{ "error": "cannot_invite_self" }`. Ontbrekend/ongeldig e-mailformaat → `400` `{ "error": "invalid_email" }`.
+3. Bestaat er al een relatie tussen dit paar (welke richting/status dan ook) → `409` `{ "error": "already_exists" }`.
+4. Anders: maak de relatie aan (`pending`).
+
+> **Let op — e-mail enumeration:** `404 user_not_found` onthult of een adres een account is. Dit wijkt bewust af van het anti-enumeration-gedrag bij `/auth/register` en `/auth/forgot-password`, omdat de contacten-UX ("geen gebruiker met dit adres") het nodig heeft. Bewust geaccepteerd.
+
+**Response `201`:** het contact-object t.o.v. de **afzender** (`status: "pending_outgoing"`, `user_id` = de uitgenodigde).
+
+**Realtime:** `contact_invited` naar **de uitgenodigde** (`pending_incoming`) én naar **de afzender zelf** (eigen andere devices, `pending_outgoing`) — elk in diens eigen perspectief.
+
+### POST `/contacts/:id/accept`
+Accepteer een openstaand **inkomend** verzoek. `:id` = relatie-id.
+
+- Alleen toegestaan als de ingelogde gebruiker de uitgenodigde is van een `pending`-relatie. Onbekend / niet van jou (of jij bent de uitnodiger) → `404`. Relatie niet meer `pending` → `409` `{ "error": "not_pending" }`.
+- Zet de relatie op `accepted`.
+
+**Response `200`:** contact-object t.o.v. de accepteerder (`status: "accepted"`).
+
+**Realtime:** `contact_accepted` naar **beide** gebruikers, elk met het object t.o.v. die gebruiker (beide `accepted`).
+
+### DELETE `/contacts/:id`
+Één call voor **afwijzen** (inkomend), **annuleren** (uitgaand) én **verwijderen** (bestaand contact). `:id` = relatie-id.
+
+- Toegestaan als de ingelogde gebruiker bij de relatie betrokken is (elke status). Anders `404`.
+- **Hard delete** van de relatie.
+
+**Response `204`** (geen body).
+
+**Realtime:** `contact_rejected` naar **de andere** gebruiker (én eigen andere devices) met payload `[ { "id": "<relatie-id>" } ]` — alleen het id volstaat; de client verwijdert de lokale rij daarmee.
+
+---
+
 ## WebSocket (`/ws`)
 
 Realtime push-notificaties voor alle schrijfoperaties. De server broadcast naar alle open verbindingen van dezelfde gebruiker.
@@ -1234,6 +1306,9 @@ Bulk-endpoints sturen dus **één** event met alle items in de array (geen event
 | `card_deleted`    | DELETE `/cards/:id` of POST `/cards/bulk-delete` (één event voor de hele batch) | `{ "id": "uuid", "deck_id": "uuid", "deleted_at": "…" }` |
 | `core_set`        | POST `/review/progress` (modus 2)    | voortgangsobjecten               |
 | `progress_deleted`| DELETE `/review/progress/:card_id`   | voortgangsobjecten (met `deleted_at` gezet) |
+| `contact_invited` | POST `/contacts`                     | contact-object (perspectief per ontvangende gebruiker) |
+| `contact_accepted`| POST `/contacts/:id/accept`          | contact-object (`accepted`, perspectief per ontvanger) |
+| `contact_rejected`| DELETE `/contacts/:id`               | `{ "id": "<relatie-id>" }`       |
 
 > **Let op:** de payload-items van `core_set` en `progress_deleted` zijn voortgangsobjecten en bevatten dus **geen** `deck_id` — wel `card_id`. Clients die het bijbehorende deck nodig hebben, moeten dat lokaal opzoeken via de kaart. Bij `progress_deleted` bevatten de overige velden nog de oude waarden van vóór de reset; alleen de verwijdering toepassen.
 
