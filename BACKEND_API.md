@@ -246,6 +246,7 @@ Alle decks van de ingelogde gebruiker, gesorteerd op aanmaakdatum (nieuwste eers
     "description": "Basiswoorden Frans",
     "is_public": false,
     "inactive": false,
+    "core_only": false,
     "tags": ["frans", "vocabulaire"],
     "created_at": "2024-01-01T00:00:00.000Z",
     "updated_at": "2024-01-02T00:00:00.000Z",
@@ -254,7 +255,9 @@ Alle decks van de ingelogde gebruiker, gesorteerd op aanmaakdatum (nieuwste eers
 ]
 ```
 
-> **`inactive`** (boolean, standaard `false`): een deck dat is "gearchiveerd". De client verbergt inactieve decks en sluit hun gewone kaarten uit van de due/new-weergave. **Uitzondering:** de core-kaarten van een inactief deck blijven gewoon meetellen en trainen — `/review/core` en `/review/core/summary` filteren bewust **niet** op `inactive`.
+> **`inactive`** (boolean, standaard `false`): een deck dat is "gearchiveerd". De client verbergt inactieve decks en sluit hun kaarten uit van de due/new-weergave. Sinds juli 2026 tellen **óók de core-kaarten** van een inactief deck **niet** meer mee: `/review/core`, `/review/core/summary` en `/review/core/scores` sluiten kaarten uit decks met `inactive = true` uit — analoog aan hoe kaarten in een soft-deleted deck al uit de core-stats vallen.
+>
+> **`core_only`** (boolean, standaard `false`): de toestand "alleen kernkaarten". Puur een client-side vlag: de client laat dan alleen de core-kaarten (`is_core = true`) van dit deck meetellen en negeert de rest. `core_only` heeft **geen** effect op de core-endpoints of op welke server-aggregatie dan ook — het wordt alleen opgeslagen, geretourneerd en gesynct (spiegelt `inactive` daarin volledig). Deze toestand neemt de rol over van het oude `inactive`-gedrag (waar core-kaarten van een inactief deck bleven meetellen).
 
 ---
 
@@ -277,6 +280,7 @@ Nieuw deck aanmaken.
   "description": "Basiswoorden",      // optioneel, max 2000 tekens
   "is_public": false,                 // optioneel, standaard false
   "inactive": false,                  // optioneel, standaard false
+  "core_only": false,                 // optioneel, standaard false
   "tags": ["frans", "school"]         // optioneel, standaard [] — max 50 tags van elk max 100 tekens
 }
 ```
@@ -290,6 +294,7 @@ Nieuw deck aanmaken.
   "description": "Basiswoorden",
   "is_public": false,
   "inactive": false,
+  "core_only": false,
   "tags": ["frans", "school"],
   "created_at": "2024-01-01T00:00:00.000Z",
   "updated_at": "2024-01-01T00:00:00.000Z",
@@ -298,7 +303,7 @@ Nieuw deck aanmaken.
 ```
 
 **Foutcodes:**
-- `400` — titel ontbreekt, veld boven de maximale lengte, of veld van het verkeerde type (tags geen string-array, is_public/inactive geen boolean)
+- `400` — titel ontbreekt, veld boven de maximale lengte, of veld van het verkeerde type (tags geen string-array, is_public/inactive/core_only geen boolean)
 
 ---
 
@@ -312,12 +317,13 @@ Deck bijwerken. Alleen meegestuurde velden worden bijgewerkt — niet-meegestuur
   "description": "Nieuwe omschrijving",
   "is_public": true,
   "inactive": true,
+  "core_only": false,
   "tags": ["nieuw", "tag"],
   "client_updated_at": "2024-01-01T00:00:00.000Z"   // optioneel — ISO timestamp van de lokaal bekende versie
 }
 ```
 
-`inactive` (boolean) wordt — net als `title`/`tags` — alleen bijgewerkt als het is meegestuurd; ontbreekt het, dan blijft de huidige waarde staan. De `409`-`current` bevat het volledige deck-object, inclusief `inactive`.
+`inactive` en `core_only` (beide boolean) worden — net als `title`/`tags` — alleen bijgewerkt als ze zijn meegestuurd; ontbreken ze, dan blijft de huidige waarde staan. De `409`-`current` bevat het volledige deck-object, inclusief `inactive` en `core_only`.
 
 Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie, wordt `409` teruggegeven. De conflict-check en de update zijn atomair (rij-lock in één transactie): twee apparaten die tegelijk schrijven kunnen elkaars write niet meer stilzwijgend overschrijven.
 
@@ -724,7 +730,7 @@ Een nieuwe review van dezelfde kaart (POST `/review/progress`) maakt het record 
 ---
 
 ### GET `/review/core/summary`
-Overzicht van alle core-kaarten (`is_core = true`) van de gebruiker (over alle decks).
+Overzicht van alle core-kaarten (`is_core = true`) van de gebruiker (over alle decks). Kaarten uit **inactieve** decks (`inactive = true`) en uit soft-deleted decks tellen **niet** mee. `core_only` speelt hier geen rol.
 
 **Response `200`:**
 ```json
@@ -740,7 +746,7 @@ Overzicht van alle core-kaarten (`is_core = true`) van de gebruiker (over alle d
 ---
 
 ### GET `/review/core/scores` 🔒
-Lichte score-index van alle core-kaarten (`is_core = true`) van de gebruiker, over alle decks. Zelfde vorm als `/review/deck/:deck_id/scores`. Bedoeld om het core-gemiddelde exact te berekenen zonder de volledige kaartdata te laden. Read-only, niet gepagineerd, gesorteerd op `card_id`.
+Lichte score-index van alle core-kaarten (`is_core = true`) van de gebruiker, over alle decks. Zelfde vorm als `/review/deck/:deck_id/scores`. Bedoeld om het core-gemiddelde exact te berekenen zonder de volledige kaartdata te laden. Read-only, niet gepagineerd, gesorteerd op `card_id`. Kaarten uit **inactieve** decks (`inactive = true`) en uit soft-deleted decks worden **niet** teruggegeven; `core_only` heeft geen effect.
 
 Bevat ook core-kaarten die nog nieuw zijn (`is_new = true`); voor die kaarten zijn de scores `null`.
 
@@ -768,6 +774,8 @@ Incrementele core-delta: de core-kaarten van de gebruiker (over alle decks) waar
 - `since` (optioneel) — ISO 8601 timestamp. Alleen records met `progress.updated_at > since` worden teruggegeven. Leeg of weggelaten = epoch, dus de eerste sync geeft alle huidige core-kaarten terug.
 
 Er wordt **niet hard op `is_core` gefilterd**: per kaart komt de actuele `is_core` mee. `is_core = true` → kaart toevoegen aan / bijwerken in de core-set; `is_core = false` → kaart is geen core meer en mag uit de core-set verwijderd worden.
+
+Kaarten uit **inactieve** decks (`inactive = true`) en uit soft-deleted decks worden **niet** teruggegeven (consistent met `/review/core/summary` en `/review/core/scores`). Let op: het inactief maken van een deck bumpt alleen `decks.updated_at`, niet `progress.updated_at`, dus zo'n deck verdwijnt niet via déze delta uit de core-set — de client leert de inactief-status via `/sync/changes` en filtert de core-set daar lokaal op. `core_only` heeft geen effect op dit endpoint.
 
 De kaart-objecten hebben exact dezelfde veldnamen als `/review/due` en `/review/deck/:deck_id` (dezelfde `FlashCard.fromJson`).
 
@@ -822,7 +830,7 @@ Overzicht van alle decks met het aantal due kaarten en nieuwe kaarten. Handig vo
     "id": "uuid",
     "title": "Frans vocabulaire",
     "tags": ["Frans", "vocabulaire"],
-    "inactive": false,         // gearchiveerd? client verbergt dan het deck (core-kaarten tellen wél door)
+    "inactive": false,         // gearchiveerd? client verbergt dan het deck; sinds juli 2026 tellen ook de core-kaarten niet meer mee in /review/core*
     "due_count": "5",          // kaarten met due_date <= nu
     "new_count": "12",         // kaarten die nog nooit zijn beantwoord (repetitions leeg of geen record)
     "total_count": "20",       // totaal aantal kaarten in het deck
@@ -867,6 +875,7 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
       "description": "...",
       "is_public": false,
       "inactive": false,
+      "core_only": false,
       "tags": ["frans"],
       "created_at": "...",
       "updated_at": "...",
@@ -1217,8 +1226,8 @@ Bulk-endpoints sturen dus **één** event met alle items in de array (geen event
 
 | `type`            | Trigger                              | `payload` (array van …)          |
 |-------------------|--------------------------------------|----------------------------------|
-| `deck_created`    | POST `/decks`                        | volledige deck-objecten          |
-| `deck_updated`    | PUT `/decks/:id`                     | bijgewerkte deck-objecten        |
+| `deck_created`    | POST `/decks`                        | volledige deck-objecten (incl. `inactive` en `core_only`) |
+| `deck_updated`    | PUT `/decks/:id`                     | bijgewerkte deck-objecten (incl. `inactive` en `core_only`) |
 | `deck_deleted`    | DELETE `/decks/:id` of POST `/decks/bulk-delete` (één event voor de hele batch) | `{ "id": "uuid", "deleted_at": "…" }` |
 | `card_created`    | POST `/cards` of POST `/cards/bulk` (één event voor de hele batch) | volledige kaart-objecten |
 | `card_updated`    | PUT `/cards/:id`                     | bijgewerkte kaart-objecten       |

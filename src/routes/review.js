@@ -492,9 +492,14 @@ router.get("/core/summary", authMiddleware, async (req, res) => {
         ROUND(AVG(ucp.stable_score)::numeric, 2) AS avg_stable_score,
         ROUND(AVG(ucp.recent_score)::numeric, 2) AS avg_recent_score
        FROM user_card_progress ucp
+       JOIN cards c ON c.id = ucp.card_id
+       JOIN decks d ON c.deck_id = d.id
        WHERE ucp.user_id = $1
          AND ucp.is_core = true
-         AND ucp.deleted_at IS NULL`,
+         AND ucp.deleted_at IS NULL
+         AND c.deleted_at IS NULL
+         AND d.deleted_at IS NULL
+         AND d.inactive = false`,
       [req.user.id]
     );
 
@@ -569,6 +574,7 @@ router.get("/core", authMiddleware, async (req, res) => {
          AND ucp.deleted_at IS NULL
          AND c.deleted_at IS NULL
          AND d.deleted_at IS NULL
+         AND d.inactive = false
        ORDER BY ucp.updated_at ASC`,
       [req.user.id, sinceDate]
     );
@@ -610,6 +616,7 @@ router.get("/core/scores", authMiddleware, async (req, res) => {
          AND ucp.deleted_at IS NULL
          AND c.deleted_at IS NULL
          AND d.deleted_at IS NULL
+         AND d.inactive = false
        ORDER BY c.id ASC`,
       [req.user.id]
     );

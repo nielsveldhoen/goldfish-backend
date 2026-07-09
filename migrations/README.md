@@ -18,6 +18,7 @@ sudo -u postgres psql -d goldfish -f 010_tombstone_purge_indexes.sql
 sudo -u postgres psql -d goldfish -f 011_decks_inactive.sql
 sudo -u postgres psql -d goldfish -f 012_deck_stats_totals.sql
 sudo -u postgres psql -d goldfish -f 013_password_reset_and_token_revocation.sql
+sudo -u postgres psql -d goldfish -f 014_decks_core_only.sql
 ```
 
 | Bestand | Wat | Herhaalbaar? |
@@ -35,6 +36,7 @@ sudo -u postgres psql -d goldfish -f 013_password_reset_and_token_revocation.sql
 | `011_decks_inactive.sql` | `inactive`-kolom (`BOOLEAN NOT NULL DEFAULT false`) op `decks` (archiveerbaar; client verbergt inactieve decks, core-kaarten blijven trainen) | ja, idempotent (`ADD COLUMN IF NOT EXISTS`) |
 | `012_deck_stats_totals.sql` | `total_cards`/`total_core_cards` (`INTEGER NULL`) op `deck_stats` — historische deckgrootte per `(deck, datum)`, zodat de client de "all decks"-stats uit `deck_stats` kan aggregeren i.p.v. `user_daily_snapshot`. Bestaande rijen blijven `null` (geen backfill) | ja, idempotent (`ADD COLUMN IF NOT EXISTS`) |
 | `013_password_reset_and_token_revocation.sql` | `password_reset_tokens`-tabel (sha256-gehasht, single-use, 1 u geldig) voor de wachtwoord-reset-flow + `users.tokens_valid_after` (JWT-revocatie-watermerk voor `POST /auth/logout-all` en de reset). **Vereist vóór deploy van de juli-2026-backend**: het auth-middleware leest de kolom op elke request. Reverse: `013_..._down.sql` | ja, idempotent (`IF NOT EXISTS` overal) |
+| `014_decks_core_only.sql` | `core_only`-kolom (`BOOLEAN NOT NULL DEFAULT false`) op `decks` ("alleen kernkaarten"-toestand; spiegelt `inactive` qua opslag/sync/WS maar zonder effect op aggregaten — client filtert zelf). Vanaf deze backend sluit `inactive = true` óók de core-kaarten van dat deck uit `/review/core*` (code, geen DDL). Reverse: `014_..._down.sql` | ja, idempotent (`ADD COLUMN IF NOT EXISTS`) |
 
 **Minimale clientversie bijstellen** (geen migratie — gewoon DML):
 ```sql

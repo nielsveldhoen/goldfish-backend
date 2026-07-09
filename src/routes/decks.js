@@ -9,13 +9,14 @@ const router = express.Router();
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Gedeelde veldvalidatie voor POST en PUT; geeft een 400-melding of null.
-function invalidDeckFields({ title, description, tags, is_public, inactive }, { titleRequired }) {
+function invalidDeckFields({ title, description, tags, is_public, inactive, core_only }, { titleRequired }) {
   return firstError(
     invalidString(title, "title", LIMITS.TITLE_MAX, { required: titleRequired }),
     invalidString(description, "description", LIMITS.DESCRIPTION_MAX),
     invalidTags(tags),
     invalidBoolean(is_public, "is_public"),
     invalidBoolean(inactive, "inactive"),
+    invalidBoolean(core_only, "core_only"),
   );
 }
 
@@ -79,7 +80,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
 // CREATE DECK
 // ========================
 router.post("/", authMiddleware, async (req, res) => {
-  const { title, description, is_public, tags, inactive } = req.body;
+  const { title, description, is_public, tags, inactive, core_only } = req.body;
 
   if (!title) {
     return res.status(400).json({ error: "Title is required" });
@@ -92,8 +93,8 @@ router.post("/", authMiddleware, async (req, res) => {
 
   try {
     const result = await pool.query(
-      `INSERT INTO decks (user_id, title, description, is_public, tags, inactive)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO decks (user_id, title, description, is_public, tags, inactive, core_only)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
       [
         req.user.id,
@@ -101,7 +102,8 @@ router.post("/", authMiddleware, async (req, res) => {
         description || null,
         is_public ?? false,
         tags ?? [],
-        inactive ?? false
+        inactive ?? false,
+        core_only ?? false
       ]
     );
 
@@ -121,7 +123,7 @@ router.post("/", authMiddleware, async (req, res) => {
 // ========================
 router.put("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
-  const { title, description, is_public, tags, inactive, client_updated_at } = req.body;
+  const { title, description, is_public, tags, inactive, core_only, client_updated_at } = req.body;
 
   if (!UUID_RE.test(id)) {
     return res.status(404).json({ error: "Deck not found" });
@@ -163,8 +165,9 @@ router.put("/:id", authMiddleware, async (req, res) => {
            description = $2,
            is_public = $3,
            tags = $4,
-           inactive = $5
-       WHERE id = $6 AND user_id = $7
+           inactive = $5,
+           core_only = $6
+       WHERE id = $7 AND user_id = $8
        RETURNING *`,
       [
         title ?? deck.title,
@@ -172,6 +175,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
         is_public ?? deck.is_public,
         tags !== undefined ? tags : deck.tags,
         inactive !== undefined ? inactive : deck.inactive,
+        core_only !== undefined ? core_only : deck.core_only,
         id,
         req.user.id
       ]
