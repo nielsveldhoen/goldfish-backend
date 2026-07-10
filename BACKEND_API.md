@@ -125,21 +125,13 @@ Login met email of username.
 
 ---
 
-### GET `/auth/verify-email`
-Bevestig het e-mailadres via de token uit de verificatiemail. Token is 24 uur geldig en single-use: na een geslaagde verificatie is hij verbruikt en geeft dezelfde link `400`.
+### GET `/auth/verify-email` (zónder `/v2`-prefix)
+Browser-flow voor de verificatielink uit de mail — de client hoeft hier niets mee. `GET ?token=...` bevestigt het e-mailadres (`email_verified = true`) en toont een HTML-bevestigingspagina; bij een ontbrekend, ongeldig of verlopen token een HTML-foutpagina met status `400`. Deze route staat **buiten** het `/v2`-prefix en buiten de client-versiegate, omdat een browser geen `X-Client-Build` meestuurt.
+
+Token is 24 uur geldig en single-use: na een geslaagde verificatie (of één klik) is hij verbruikt en toont dezelfde link de foutpagina.
 
 **Query params:**
 - `token` — de verificatietoken uit de mail
-
-**Response `200`:**
-```json
-{
-  "message": "Email verified successfully"
-}
-```
-
-**Foutcodes:**
-- `400` — token ontbreekt, ongeldig of verlopen
 
 ---
 

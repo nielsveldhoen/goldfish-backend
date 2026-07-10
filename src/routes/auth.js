@@ -231,40 +231,8 @@ router.post("/login", authLimiter, async (req, res) => {
 // ========================
 // VERIFY EMAIL
 // ========================
-router.get("/verify-email", async (req, res) => {
-  const { token } = req.query;
-
-  if (!token) {
-    return res.status(400).json({ error: "Missing token" });
-  }
-
-  try {
-    // Single-use: verwijder het token direct bij het opvragen, zodat een
-    // tweede poging met hetzelfde token altijd faalt.
-    const result = await pool.query(
-      `DELETE FROM email_verification_tokens WHERE token = $1 RETURNING *`,
-      [hashToken(token)]
-    );
-
-    const record = result.rows[0];
-
-    if (!record || new Date(record.expires_at) < new Date()) {
-      return res.status(400).json({ error: "Invalid or expired token" });
-    }
-
-    await pool.query(
-      `UPDATE users SET email_verified = true WHERE id = $1`,
-      [record.user_id]
-    );
-
-    res.json({ message: "Email verified successfully" });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
+// De GET /auth/verify-email-route is een browser-flow en leeft buiten het
+// /v2-prefix (geen X-Client-Build in een browser), zie src/routes/verifyEmail.js.
 
 // ========================
 // RESEND VERIFICATION EMAIL

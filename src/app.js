@@ -6,6 +6,7 @@ import helmet from "helmet";
 
 import authRoutes from "./routes/auth.js";
 import passwordResetRoutes from "./routes/passwordReset.js";
+import verifyEmailRoutes from "./routes/verifyEmail.js";
 import deckRoutes from "./routes/decks.js";
 import cardRoutes from "./routes/cards.js";
 import reviewRoutes from "./routes/review.js";
@@ -98,10 +99,11 @@ app.get("/", (req, res) => {
   res.send("Goldfish API running 🐟");
 });
 
-// Wachtwoord-reset (browser-flow): de link uit de mail opent in een browser,
-// die geen X-Client-Build meestuurt — daarom buiten /v2 en buiten de
-// versiegate, net als /version.
+// Wachtwoord-reset en e-mailverificatie (browser-flows): de link uit de mail
+// opent in een browser, die geen X-Client-Build meestuurt — daarom buiten /v2
+// en buiten de versiegate, net als /version.
 app.use("/auth/reset-password", passwordResetRoutes);
+app.use("/auth/verify-email", verifyEmailRoutes);
 
 // Alle API-routes zitten onder een expliciet versie-prefix en achter de
 // client-versiegate. Nu alleen /v2; een toekomstige versie krijgt een eigen
