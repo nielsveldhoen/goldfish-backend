@@ -14,7 +14,12 @@
 -- gen_random_uuid() is in Postgres 13+ ingebouwd (pgcrypto niet nodig); decks/
 -- users gebruiken hetzelfde patroon.
 --
--- Idempotent: CREATE TABLE / INDEX IF NOT EXISTS.
+-- De tabel wordt als `postgres` aangemaakt; de app-rol `goldfish` heeft alleen
+-- DML nodig en krijgt die expliciet via GRANT (net als migratie 013). Zonder
+-- deze GRANT faalt elke contact-query met "permission denied for table
+-- contacts" (42501).
+--
+-- Idempotent: CREATE TABLE / INDEX IF NOT EXISTS, GRANT is idempotent.
 
 BEGIN;
 
@@ -38,6 +43,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS contacts_pair_uniq
 -- expressie-argument niet direct bruikbaar, dus een eigen index).
 CREATE INDEX IF NOT EXISTS contacts_requester_idx ON contacts (requester_id);
 CREATE INDEX IF NOT EXISTS contacts_addressee_idx ON contacts (addressee_id);
+
+-- App-rol krijgt DML op de nieuwe tabel (geen sequence: id is gen_random_uuid()).
+GRANT SELECT, INSERT, UPDATE, DELETE ON contacts TO goldfish;
 
 INSERT INTO schema_migrations (version)
 VALUES ('015_contacts')
