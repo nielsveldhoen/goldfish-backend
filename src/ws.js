@@ -154,7 +154,7 @@ export async function broadcastDeck(deckId, type, payload, { excludeUserId = nul
     `SELECT user_id AS id FROM decks WHERE id = $1
      UNION
      SELECT recipient_id AS id FROM deck_shares
-     WHERE deck_id = $1 AND revoked_at IS NULL`,
+     WHERE deck_id = $1 AND revoked_at IS NULL AND accepted_at IS NOT NULL`,
     [deckId]
   );
   const userIds = rows.map((r) => r.id).filter((id) => id !== excludeUserId);

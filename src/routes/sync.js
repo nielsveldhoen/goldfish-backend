@@ -98,7 +98,8 @@ router.get("/changes", authMiddleware, async (req, res) => {
          LEFT JOIN LATERAL (
            SELECT bool_and(s.inactive) AS inactive, MAX(s.updated_at) AS last_update
            FROM deck_shares s
-           WHERE s.deck_id = d.id AND s.recipient_id = $1 AND s.revoked_at IS NULL
+           WHERE s.deck_id = d.id AND s.recipient_id = $1
+             AND s.revoked_at IS NULL AND s.accepted_at IS NOT NULL
          ) sh ON true
          WHERE (d.user_id = $1 AND d.updated_at > $2)
             OR (sh.inactive IS NOT NULL AND (d.updated_at > $2 OR sh.last_update > $2))
@@ -116,10 +117,12 @@ router.get("/changes", authMiddleware, async (req, res) => {
                  SELECT id FROM decks WHERE user_id = $1
                  UNION
                  SELECT deck_id FROM deck_shares
-                 WHERE recipient_id = $1 AND revoked_at IS NULL))
+                 WHERE recipient_id = $1 AND revoked_at IS NULL
+                   AND accepted_at IS NOT NULL))
             OR c.deck_id IN (
                  SELECT deck_id FROM deck_shares
-                 WHERE recipient_id = $1 AND revoked_at IS NULL AND updated_at > $2)
+                 WHERE recipient_id = $1 AND revoked_at IS NULL
+                   AND accepted_at IS NOT NULL AND updated_at > $2)
          ORDER BY c.updated_at ASC`,
         [req.user.id, sinceDate]
       ),
@@ -130,8 +133,9 @@ router.get("/changes", authMiddleware, async (req, res) => {
         [req.user.id, sinceDate]
       ),
       // Toegang verloren (revoke/ontvolgen/kick): geen tombstone — het deck
-      // bestaat nog. Alleen decks zonder énige resterende actieve share; de
-      // client ruimt deck + kaarten + eigen progress lokaal op.
+      // bestaat nog. Alleen decks zonder énige resterende actieve share (een
+      // pending uitnodiging telt niet: tot accept hoort het deck lokaal weg);
+      // de client ruimt deck + kaarten + eigen progress lokaal op.
       pool.query(
         `SELECT DISTINCT s.deck_id FROM deck_shares s
          WHERE s.recipient_id = $1 AND s.revoked_at > $2
@@ -139,7 +143,8 @@ router.get("/changes", authMiddleware, async (req, res) => {
              SELECT 1 FROM deck_shares s2
              WHERE s2.deck_id = s.deck_id
                AND s2.recipient_id = $1
-               AND s2.revoked_at IS NULL)`,
+               AND s2.revoked_at IS NULL
+               AND s2.accepted_at IS NOT NULL)`,
         [req.user.id, sinceDate]
       ),
     ]);

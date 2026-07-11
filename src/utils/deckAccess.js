@@ -1,8 +1,10 @@
 // Toegangslaag voor deck-sharing (SHARING_PLAN.md). Eén plek voor de
 // SQL-fragmenten en de response-shaping, zodat alle routes uniform blijven.
 //
-// Model: één niet-gerevokete rij in deck_shares = leestoegang voor de
-// recipient tot het deck (+ eigen progress erop). Schrijven aan deck/kaarten
+// Model: één niet-gerevokete, geaccepteerde rij in deck_shares = leestoegang
+// voor de recipient tot het deck (+ eigen progress erop). accepted_at IS NULL
+// = uitnodiging in afwachting (alleen kind='invited'): nog géén toegang, de
+// ontvanger accepteert of wijst af. Schrijven aan deck/kaarten
 // blijft owner-only — maar via canWriteDeckSql, zodat Release C
 // (schrijfrechten voor groepsleden) alleen dát fragment hoeft te verruimen.
 
@@ -14,7 +16,8 @@ export function canReadDeckSql(alias, userParam) {
     SELECT 1 FROM deck_shares _s
     WHERE _s.deck_id = ${alias}.id
       AND _s.recipient_id = ${userParam}
-      AND _s.revoked_at IS NULL))`;
+      AND _s.revoked_at IS NULL
+      AND _s.accepted_at IS NOT NULL))`;
 }
 
 // Schrijftoegang: v1 = alleen de eigenaar. Release C verruimt dit fragment
@@ -32,7 +35,8 @@ export function effectiveInactiveSql(alias, userParam) {
     ELSE COALESCE((SELECT bool_and(_si.inactive) FROM deck_shares _si
       WHERE _si.deck_id = ${alias}.id
         AND _si.recipient_id = ${userParam}
-        AND _si.revoked_at IS NULL), false) END)`;
+        AND _si.revoked_at IS NULL
+        AND _si.accepted_at IS NOT NULL), false) END)`;
 }
 
 // Extra SELECT-kolommen voor deck-reads: role, owner_username, can_edit en de
@@ -110,7 +114,9 @@ export async function revokeShares(client, { deckId, deckIds, recipientId, group
   const deckIdsArr = revoked.rows.map((r) => r.deck_id);
   const recipientIdsArr = revoked.rows.map((r) => r.recipient_id);
 
-  // Paren die géén actieve share meer hebben = toegang volledig kwijt.
+  // Paren die géén actieve share meer hebben = toegang volledig kwijt. Een
+  // resterende pending uitnodiging telt niet als toegang en mag het
+  // deck_removed-signaal dus niet onderdrukken.
   const removed = await client.query(
     `SELECT DISTINCT r.deck_id, r.recipient_id
      FROM unnest($1::uuid[], $2::uuid[]) AS r(deck_id, recipient_id)
@@ -118,7 +124,8 @@ export async function revokeShares(client, { deckId, deckIds, recipientId, group
        SELECT 1 FROM deck_shares s
        WHERE s.deck_id = r.deck_id
          AND s.recipient_id = r.recipient_id
-         AND s.revoked_at IS NULL)`,
+         AND s.revoked_at IS NULL
+         AND s.accepted_at IS NOT NULL)`,
     [deckIdsArr, recipientIdsArr]
   );
 
@@ -137,7 +144,8 @@ export async function revokeShares(client, { deckId, deckIds, recipientId, group
            SELECT 1 FROM deck_shares s
            WHERE s.deck_id = r.deck_id
              AND s.recipient_id = r.recipient_id
-             AND s.revoked_at IS NULL)`,
+             AND s.revoked_at IS NULL
+             AND s.accepted_at IS NOT NULL)`,
       [removed.rows.map((r) => r.deck_id), removed.rows.map((r) => r.recipient_id)]
     );
   }

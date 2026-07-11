@@ -916,7 +916,7 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
 }
 ```
 
-> **Gedeelde decks in de delta:** wordt een deck (opnieuw) met je gedeeld of voeg je een groepsdeck toe, dan komt het deck **én al zijn kaarten integraal** mee in de eerstvolgende delta — ook al zijn hun `updated_at`'s ouder dan `since` (het nieuw-gedeeld-venster kijkt naar de share-rij). Voor recipients bevat `inactive` de eigen archiefvlag (share-state), niet die van de eigenaar.
+> **Gedeelde decks in de delta:** accepteer je een deck-uitnodiging, volg je een publiek deck of voeg je een groepsdeck toe, dan komt het deck **én al zijn kaarten integraal** mee in de eerstvolgende delta — ook al zijn hun `updated_at`'s ouder dan `since` (het nieuw-gedeeld-venster kijkt naar de share-rij). Een nog niet geaccepteerde uitnodiging reist **niet** mee. Voor recipients bevat `inactive` de eigen archiefvlag (share-state), niet die van de eigenaar.
 >
 > **`removed_deck_ids`:** decks waarvoor de toegang sinds `since` is **ingetrokken** (revoke door de eigenaar, zelf ontvolgd, kick uit een groep, groep opgeheven). Er is dan geen tombstone — het deck bestaat nog bij de eigenaar. De client verwijdert deck + kaarten + eigen progress lokaal. Alleen decks zonder énige resterende toegangsbron staan erin. Bij `full_resync` is dit veld irrelevant (de client herbouwt toch alles). Oudere clients mogen het veld negeren.
 
@@ -1275,31 +1275,39 @@ Accepteer een openstaand **inkomend** verzoek. `:id` = relatie-id.
 
 ## Delen & publieke bibliotheek 🔒
 
-Decks worden **live** gedeeld — geen kopieën. Een recipient ziet hetzelfde deck en dezelfde kaarten als de eigenaar (read-only), met volledig eigen voortgang/scores (`user_card_progress` is per user). Eén toegangsmodel: een actieve rij in `deck_shares` = leestoegang, ongeacht de bron:
+Decks worden **live** gedeeld — geen kopieën. Een recipient ziet hetzelfde deck en dezelfde kaarten als de eigenaar (read-only), met volledig eigen voortgang/scores (`user_card_progress` is per user). Eén toegangsmodel: een actieve, **geaccepteerde** rij in `deck_shares` = leestoegang, ongeacht de bron:
 
-- **`invited`** — door de eigenaar met een **geaccepteerd contact** gedeeld;
-- **`subscribed`** — zelf gevolgd (publiek deck);
-- **`group`** — zelf toegevoegd uit een groepscatalogus (zie [Groepen](#groepen-groups-🔒)).
+- **`invited`** — door de eigenaar met een **geaccepteerd contact** gedeeld. Begint als **uitnodiging** (`accepted_at = null`): de ontvanger accepteert of wijst af; tot die tijd géén toegang en reist het deck niet mee in de sync;
+- **`subscribed`** — zelf gevolgd (publiek deck; eigen actie → direct geaccepteerd);
+- **`group`** — zelf toegevoegd uit een groepscatalogus (eigen actie → direct geaccepteerd; zie [Groepen](#groepen-groups-🔒)).
 
 Een recipient mag: alles lezen, eigen progress schrijven/resetten, eigen stats loggen, zijn eigen archiefvlag zetten en zelf afhaken. Writes op deck/kaarten geven `404` (zelfde als "bestaat niet").
 
 ### POST `/decks/:id/share`
-Deel een eigen deck met een geaccepteerd contact.
+Deel een eigen deck met een geaccepteerd contact. Maakt een **uitnodiging** aan (`accepted_at = null`): het deck verschijnt bij de ontvanger in de accepteer/afwijs-lijst (`GET /shares/received`), niet meteen op het dashboard.
 
 **Request body:** `{ "recipient_id": "uuid" }` (het `user_id` uit het contact-object)
 
 - Alleen de eigenaar; onbekend/andermans deck → `404`.
 - `recipient_id` geen wederzijds geaccepteerd contact → `403` `{ "error": "not_a_contact" }`.
 - Jezelf → `400` `{ "error": "cannot_share_with_self" }`.
-- Her-delen na intrekken = upsert (share wordt weer actief).
+- Her-delen na intrekken/afwijzen = upsert → nieuwe uitnodiging. Her-delen van een nog openstaande of al geaccepteerde share verandert de status niet (dubbel delen degradeert niets).
 
-**Response `201`:** de share-rij. **Realtime:** `share_received` naar de ontvanger.
+**Response `201`:** de share-rij. **Realtime:** `share_received` naar de ontvanger — alleen zolang het een openstaande uitnodiging is.
+
+### POST `/decks/:id/share/accept`
+Ontvanger accepteert een openstaande uitnodiging. Deck + kaarten komen daarna integraal mee in de eerstvolgende sync-delta (nieuw-gedeeld-venster). Geen openstaande uitnodiging → `404`.
+
+**Response `200`:** de share-rij. **Realtime:** `share_resolved` (`[ { "deck_id" } ]`) naar eigen andere devices. **Afwijzen** = `DELETE /decks/:id/follow` (zie hieronder).
+
+### GET `/shares/received`
+Mijn openstaande deck-uitnodigingen (de accepteer/afwijs-lijst): `[ { deck_id, deck_title, description, owner_username, created_at, card_count } ]`.
 
 ### DELETE `/decks/:id/share/:recipient_id`
-Eigenaar trekt een directe share (invited/subscribed) in. Idempotent → `204`. De progress van de recipient op dit deck wordt soft-deleted (tenzij een groepsshare de toegang nog draagt). **Realtime:** `deck_removed` naar de recipient.
+Eigenaar trekt een directe share (invited/subscribed) of openstaande uitnodiging in. Idempotent → `204`. De progress van de recipient op dit deck wordt soft-deleted (tenzij een groepsshare de toegang nog draagt). **Realtime:** `deck_removed` naar de recipient.
 
 ### GET `/shares/sent`
-Actieve directe shares op mijn decks (om in te trekken): `[ { deck_id, deck_title, recipient_id, recipient_username, kind, created_at } ]`. Geen e-mailadressen. Groepsshares lopen via de groep.
+Actieve directe shares op mijn decks (om in te trekken): `[ { deck_id, deck_title, recipient_id, recipient_username, kind, created_at, pending } ]` — `pending: true` zolang de ontvanger de uitnodiging nog niet accepteerde. Geen e-mailadressen. Groepsshares lopen via de groep.
 
 ### GET `/decks/public`
 Publieke bibliotheek (discovery), gepagineerd. Eigen decks worden uitgesloten.
@@ -1309,12 +1317,12 @@ Publieke bibliotheek (discovery), gepagineerd. Eigen decks worden uitgesloten.
 **Response `200`:** `[ { id, title, description, tags, created_at, owner_username, card_count } ]`
 
 ### POST `/decks/:id/follow` / DELETE `/decks/:id/follow`
-Publiek deck volgen (`201`, share `kind: "subscribed"`) of een gedeeld deck van je dashboard halen (`204`). Follow op een niet-publiek/onbekend/eigen deck → `404`. **Unfollow geldt voor élke bron** (invited, subscribed én group) — een ontvanger mag altijd zelf afhaken; een groepsdeck is daarna opnieuw uit de catalogus toe te voegen. Eigen progress op het deck wordt bij unfollow soft-deleted.
+Publiek deck volgen (`201`, share `kind: "subscribed"`, direct geaccepteerd) of een gedeeld deck van je dashboard halen (`204`). Follow op een niet-publiek/onbekend/eigen deck → `404`. **Unfollow geldt voor élke bron** (invited, subscribed én group) — een ontvanger mag altijd zelf afhaken — en is ook het **afwijzen van een openstaande uitnodiging**. Eigen progress op het deck wordt bij unfollow soft-deleted.
 
 ### PUT `/decks/:id/share-state`
 Archiefvlag van de **ontvanger** op een gedeeld deck (het enige dat een recipient "schrijft").
 
-**Request body:** `{ "inactive": true }` → **Response `200`:** `{ "deck_id": "…", "inactive": true }`. Geen actieve share → `404`. **Realtime:** `shared_deck_state` naar eigen andere devices.
+**Request body:** `{ "inactive": true }` → **Response `200`:** `{ "deck_id": "…", "inactive": true }`. Geen actieve **geaccepteerde** share → `404`. **Realtime:** `shared_deck_state` naar eigen andere devices.
 
 > Zet de eigenaar `is_public` uit, dan behouden bestaande volgers hun toegang (alleen nieuwe volgers worden geblokkeerd); intrekken kan per recipient via `DELETE /decks/:id/share/:recipient_id`.
 
@@ -1437,8 +1445,9 @@ Bulk-endpoints sturen dus **één** event met alle items in de array (geen event
 | `contact_invited` | POST `/contacts`                     | contact-object (perspectief per ontvangende gebruiker) |
 | `contact_accepted`| POST `/contacts/:id/accept`          | contact-object (`accepted`, perspectief per ontvanger) |
 | `contact_rejected`| DELETE `/contacts/:id`               | `{ "id": "<relatie-id>" }`       |
-| `share_received`  | POST `/decks/:id/share` (naar de ontvanger) | `{ "deck_id", "title", "owner_username" }` — hint; het deck zelf komt via de sync |
-| `deck_removed`    | toegang verloren: share ingetrokken, ontvolgd, kick, deck uit catalogus, groep opgeheven | `{ "id": "<deck-id>" }` — client verwijdert deck + kaarten + eigen progress lokaal |
+| `share_received`  | POST `/decks/:id/share` (naar de ontvanger) | `{ "deck_id", "title", "owner_username" }` — **uitnodiging**: hoort in de accepteer/afwijs-lijst; het deck zelf komt pas na accepteren via de sync |
+| `share_resolved`  | POST `/decks/:id/share/accept` (eigen andere devices) | `{ "deck_id" }` — uitnodiging is geaccepteerd: uit de pending-lijst halen en bijsyncen |
+| `deck_removed`    | toegang verloren: share/uitnodiging ingetrokken, afgewezen, ontvolgd, kick, deck uit catalogus, groep opgeheven | `{ "id": "<deck-id>" }` — client verwijdert deck + kaarten + eigen progress lokaal (en haalt een eventuele uitnodiging uit de pending-lijst) |
 | `shared_deck_state` | PUT `/decks/:id/share-state` (eigen andere devices) | `{ "id": "<deck-id>", "inactive": bool }` |
 | `group_updated`   | elke groepsmutatie (join, invite, leden, bevoegdheden, catalogus, naam) — naar alle leden | volledig group-object (client upsert zijn Hive-box) |
 | `group_invite_received` | POST `/groups/:id/invites` (naar het doelwit) | volledig group-object (eigen member-rij heeft `status: "invited"`) |

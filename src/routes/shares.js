@@ -80,24 +80,33 @@ router.post("/decks/:id/share", authMiddleware, async (req, res) => {
       return res.status(403).json({ error: "not_a_contact" });
     }
 
-    // Upsert op de directe rij: her-delen na revoke maakt de share weer
-    // actief (updated_at = NOW() → valt in het nieuw-gedeeld-venster van
-    // /sync/changes, dus de recipient krijgt deck + kaarten integraal).
+    // Upsert op de directe rij. Een nieuwe share begint als uitnodiging
+    // (accepted_at = NULL): nog géén toegang, de ontvanger accepteert eerst.
+    // Was de rij al actief (pending óf geaccepteerd), dan blijft die status
+    // staan — dubbel delen degradeert een geaccepteerde share niet. Her-delen
+    // na revoke wordt weer een verse uitnodiging.
     const share = await client.query(
-      `INSERT INTO deck_shares (deck_id, owner_id, recipient_id, kind)
-       VALUES ($1, $2, $3, 'invited')
+      `INSERT INTO deck_shares (deck_id, owner_id, recipient_id, kind, accepted_at)
+       VALUES ($1, $2, $3, 'invited', NULL)
        ON CONFLICT (deck_id, recipient_id) WHERE group_id IS NULL
-       DO UPDATE SET revoked_at = NULL, inactive = false, kind = 'invited', updated_at = NOW()
+       DO UPDATE SET
+         accepted_at = CASE WHEN deck_shares.revoked_at IS NULL
+                            THEN deck_shares.accepted_at ELSE NULL END,
+         revoked_at = NULL, inactive = false, kind = 'invited', updated_at = NOW()
        RETURNING *`,
       [id, req.user.id, recipient_id]
     );
 
     await client.query("COMMIT");
 
-    const meRes = await pool.query(`SELECT username FROM users WHERE id = $1`, [req.user.id]);
-    broadcast(recipient_id, "share_received", [
-      { deck_id: id, title: deckCheck.rows[0].title, owner_username: meRes.rows[0].username },
-    ]);
+    // Alleen melden zolang het een openstaande uitnodiging is; een al
+    // geaccepteerde share opnieuw delen verandert niets bij de ontvanger.
+    if (share.rows[0].accepted_at === null) {
+      const meRes = await pool.query(`SELECT username FROM users WHERE id = $1`, [req.user.id]);
+      broadcast(recipient_id, "share_received", [
+        { deck_id: id, title: deckCheck.rows[0].title, owner_username: meRes.rows[0].username },
+      ]);
+    }
 
     res.status(201).json(share.rows[0]);
   } catch (err) {
@@ -106,6 +115,73 @@ router.post("/decks/:id/share", authMiddleware, async (req, res) => {
     res.status(500).json({ error: "Server error" });
   } finally {
     client.release();
+  }
+});
+
+// ========================
+// POST /decks/:id/share/accept — ontvanger accepteert een uitnodiging
+// ========================
+// Zet accepted_at; updated_at = NOW() laat de rij in het nieuw-gedeeld-venster
+// van /sync/changes vallen, dus de eerstvolgende sync levert deck + kaarten
+// integraal. Afwijzen = DELETE /decks/:id/follow (ontvanger haakt af).
+router.post("/decks/:id/share/accept", authMiddleware, async (req, res) => {
+  const { id } = req.params;
+
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Share not found" });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE deck_shares
+       SET accepted_at = NOW(), updated_at = NOW()
+       WHERE deck_id = $1 AND recipient_id = $2
+         AND revoked_at IS NULL AND accepted_at IS NULL
+       RETURNING *`,
+      [id, req.user.id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Share not found" });
+    }
+
+    // Eigen andere devices: uitnodiging uit de lijst halen en bijsyncen.
+    broadcast(req.user.id, "share_resolved", [{ deck_id: id }]);
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ========================
+// GET /shares/received — openstaande deck-uitnodigingen voor mij
+// ========================
+// De accepteer/afwijs-lijst van de ontvanger. Alleen pending directe shares;
+// geaccepteerde shares staan gewoon als deck op het dashboard.
+router.get("/shares/received", authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT s.deck_id, d.title AS deck_title, d.description,
+              u.username AS owner_username, s.created_at,
+              (SELECT COUNT(*) FROM cards c
+               WHERE c.deck_id = d.id AND c.deleted_at IS NULL) AS card_count
+       FROM deck_shares s
+       JOIN decks d ON d.id = s.deck_id
+       JOIN users u ON u.id = s.owner_id
+       WHERE s.recipient_id = $1
+         AND s.revoked_at IS NULL
+         AND s.accepted_at IS NULL
+         AND d.deleted_at IS NULL
+       ORDER BY s.created_at DESC`,
+      [req.user.id]
+    );
+
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
@@ -167,7 +243,8 @@ router.get("/shares/sent", authMiddleware, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT s.deck_id, d.title AS deck_title, s.recipient_id,
-              u.username AS recipient_username, s.kind, s.created_at
+              u.username AS recipient_username, s.kind, s.created_at,
+              (s.accepted_at IS NULL) AS pending
        FROM deck_shares s
        JOIN decks d ON d.id = s.deck_id
        JOIN users u ON u.id = s.recipient_id
@@ -266,7 +343,8 @@ router.post("/decks/:id/follow", authMiddleware, async (req, res) => {
       `INSERT INTO deck_shares (deck_id, owner_id, recipient_id, kind)
        VALUES ($1, $2, $3, 'subscribed')
        ON CONFLICT (deck_id, recipient_id) WHERE group_id IS NULL
-       DO UPDATE SET revoked_at = NULL, inactive = false, updated_at = NOW()
+       DO UPDATE SET revoked_at = NULL, inactive = false, updated_at = NOW(),
+         accepted_at = COALESCE(deck_shares.accepted_at, NOW())
        RETURNING *`,
       [id, deckCheck.rows[0].user_id, req.user.id]
     );
@@ -288,7 +366,8 @@ router.post("/decks/:id/follow", authMiddleware, async (req, res) => {
 // ========================
 // Geldt voor élke bron (invited, subscribed én group): een ontvanger mag
 // altijd zelf afhaken. Een groepsdeck kan daarna opnieuw uit de catalogus
-// worden toegevoegd.
+// worden toegevoegd. Ook het afwijzen van een openstaande uitnodiging loopt
+// hierlangs (pending rij wordt gerevoket).
 router.delete("/decks/:id/follow", authMiddleware, async (req, res) => {
   const { id } = req.params;
 
@@ -341,7 +420,8 @@ router.put("/decks/:id/share-state", authMiddleware, async (req, res) => {
     const result = await pool.query(
       `UPDATE deck_shares
        SET inactive = $1, updated_at = NOW()
-       WHERE deck_id = $2 AND recipient_id = $3 AND revoked_at IS NULL
+       WHERE deck_id = $2 AND recipient_id = $3
+         AND revoked_at IS NULL AND accepted_at IS NOT NULL
        RETURNING deck_id, inactive`,
       [inactive, id, req.user.id]
     );

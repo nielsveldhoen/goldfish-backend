@@ -74,19 +74,75 @@ describe("Deck-sharing", () => {
     assert.equal(nope.status, 403);
     assert.equal(nope.body.error, "not_a_contact");
 
-    // Happy path.
+    // Happy path: delen maakt een uitnodiging (nog geen toegang).
     const share = await request(app)
       .post(`/v2/decks/${deck.id}/share`)
       .set("Authorization", `Bearer ${ownerToken}`)
       .send({ recipient_id: friend.id });
     assert.equal(share.status, 201);
     assert.equal(share.body.kind, "invited");
+    assert.equal(share.body.accepted_at, null);
 
     await sleep(150);
     const received = connFriend.events.find((e) => e.type === "share_received");
     assert.ok(received, "recipient moet share_received krijgen");
     assert.equal(received.payload[0].deck_id, deck.id);
     assert.equal(received.payload[0].owner_username, owner.username);
+
+    // Vóór accepteren: deck niet in de lijst, wél in /shares/received;
+    // owner ziet de share als pending in /shares/sent.
+    const preAccept = await request(app)
+      .get("/v2/decks")
+      .set("Authorization", `Bearer ${friendToken}`);
+    assert.ok(!preAccept.body.some((d) => d.id === deck.id),
+      "uitnodiging mag nog geen deck opleveren");
+
+    const pendingList = await request(app)
+      .get("/v2/shares/received")
+      .set("Authorization", `Bearer ${friendToken}`);
+    assert.equal(pendingList.status, 200);
+    const invite = pendingList.body.find((i) => i.deck_id === deck.id);
+    assert.ok(invite, "uitnodiging moet in /shares/received staan");
+    assert.equal(invite.deck_title, "Gedeeld deck");
+    assert.equal(invite.owner_username, owner.username);
+    assert.equal(Number(invite.card_count), 1);
+
+    const sentPending = await request(app)
+      .get("/v2/shares/sent")
+      .set("Authorization", `Bearer ${ownerToken}`);
+    assert.equal(sentPending.body.find((s) => s.deck_id === deck.id).pending, true);
+
+    // Accepteren → share_resolved naar eigen devices, uitnodiging weg.
+    connFriend.events.length = 0;
+    const accept = await request(app)
+      .post(`/v2/decks/${deck.id}/share/accept`)
+      .set("Authorization", `Bearer ${friendToken}`);
+    assert.equal(accept.status, 200);
+    assert.ok(accept.body.accepted_at, "accept moet accepted_at zetten");
+
+    await sleep(150);
+    const resolved = connFriend.events.find((e) => e.type === "share_resolved");
+    assert.ok(resolved, "eigen devices moeten share_resolved krijgen");
+    assert.equal(resolved.payload[0].deck_id, deck.id);
+
+    const pendingAfter = await request(app)
+      .get("/v2/shares/received")
+      .set("Authorization", `Bearer ${friendToken}`);
+    assert.ok(!pendingAfter.body.some((i) => i.deck_id === deck.id));
+
+    // Nogmaals accepteren → 404 (geen openstaande uitnodiging meer).
+    const reAccept = await request(app)
+      .post(`/v2/decks/${deck.id}/share/accept`)
+      .set("Authorization", `Bearer ${friendToken}`);
+    assert.equal(reAccept.status, 404);
+
+    // Her-delen van een geaccepteerde share degradeert die niet naar pending.
+    const reShare = await request(app)
+      .post(`/v2/decks/${deck.id}/share`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .send({ recipient_id: friend.id });
+    assert.equal(reShare.status, 201);
+    assert.ok(reShare.body.accepted_at, "geaccepteerde share moet geaccepteerd blijven");
 
     // Recipient ziet het deck met role/can_edit/owner_username.
     const list = await request(app)
@@ -220,7 +276,18 @@ describe("Deck-sharing", () => {
       .set("Authorization", `Bearer ${ownerToken}`)
       .send({ recipient_id: friend.id });
 
-    // Na de share: deck én (oude) kaarten integraal in de delta.
+    // Uitnodiging nog niet geaccepteerd: delta blijft leeg.
+    const whilePending = await request(app)
+      .get(`/v2/sync/changes?since=${encodeURIComponent(since)}`)
+      .set("Authorization", `Bearer ${friendToken}`);
+    assert.equal(whilePending.body.decks.length, 0, "pending uitnodiging reist niet mee");
+    assert.equal(whilePending.body.cards.length, 0);
+
+    await request(app)
+      .post(`/v2/decks/${deck.id}/share/accept`)
+      .set("Authorization", `Bearer ${friendToken}`);
+
+    // Na accepteren: deck én (oude) kaarten integraal in de delta.
     const afterShare = await request(app)
       .get(`/v2/sync/changes?since=${encodeURIComponent(since)}`)
       .set("Authorization", `Bearer ${friendToken}`);
@@ -254,13 +321,49 @@ describe("Deck-sharing", () => {
     );
     assert.ok(progressRows.rows[0].deleted_at, "progress moet soft-deleted zijn na revoke");
 
-    // Her-delen na revoke (upsert) werkt en levert het deck opnieuw.
+    // Her-delen na revoke (upsert) werkt en is weer een verse uitnodiging.
     const reshare = await request(app)
       .post(`/v2/decks/${deck.id}/share`)
       .set("Authorization", `Bearer ${ownerToken}`)
       .send({ recipient_id: friend.id });
     assert.equal(reshare.status, 201);
     assert.equal(reshare.body.revoked_at, null);
+    assert.equal(reshare.body.accepted_at, null);
+  });
+
+  test("uitnodiging afwijzen: DELETE /follow revoket de pending rij", async () => {
+    const { user: owner, token: ownerToken } = await freshUser();
+    const { user: friend, token: friendToken } = await freshUser();
+    await createContact(owner.id, friend.id);
+    const deck = await createDeck(owner.id, "Afgewezen deck");
+
+    await request(app)
+      .post(`/v2/decks/${deck.id}/share`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .send({ recipient_id: friend.id });
+
+    const decline = await request(app)
+      .delete(`/v2/decks/${deck.id}/follow`)
+      .set("Authorization", `Bearer ${friendToken}`);
+    assert.equal(decline.status, 204);
+
+    const pendingAfter = await request(app)
+      .get("/v2/shares/received")
+      .set("Authorization", `Bearer ${friendToken}`);
+    assert.ok(!pendingAfter.body.some((i) => i.deck_id === deck.id));
+
+    // Accepteren kan niet meer; opnieuw delen maakt een nieuwe uitnodiging.
+    const accept = await request(app)
+      .post(`/v2/decks/${deck.id}/share/accept`)
+      .set("Authorization", `Bearer ${friendToken}`);
+    assert.equal(accept.status, 404);
+
+    const reshare = await request(app)
+      .post(`/v2/decks/${deck.id}/share`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .send({ recipient_id: friend.id });
+    assert.equal(reshare.status, 201);
+    assert.equal(reshare.body.accepted_at, null);
   });
 
   test("publieke bibliotheek: discovery, follow/unfollow, routevolgorde", async () => {
@@ -341,6 +444,9 @@ describe("Deck-sharing", () => {
       .post(`/v2/decks/${deck.id}/share`)
       .set("Authorization", `Bearer ${ownerToken}`)
       .send({ recipient_id: friend.id });
+    await request(app)
+      .post(`/v2/decks/${deck.id}/share/accept`)
+      .set("Authorization", `Bearer ${friendToken}`);
 
     const connFriend = await connectCollector(tokenFor(friend.id));
     const since = new Date(Date.now() - 60_000).toISOString();
