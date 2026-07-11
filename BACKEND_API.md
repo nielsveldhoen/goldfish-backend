@@ -223,10 +223,10 @@ Haal het profiel op van de ingelogde gebruiker.
 
 ## Decks (`/decks`) 🔒
 
-Alle deck-endpoints vereisen authenticatie. Gebruikers zien en beheren alleen hun eigen decks.
+Alle deck-endpoints vereisen authenticatie. Gebruikers zien hun **eigen decks én de decks die met hen gedeeld zijn** (zie [Delen](#delen--publieke-bibliotheek-🔒)). Schrijven (deck/kaarten bewerken of verwijderen) kan alleen de eigenaar.
 
 ### GET `/decks`
-Alle decks van de ingelogde gebruiker, gesorteerd op aanmaakdatum (nieuwste eerst). Soft-deleted decks worden niet teruggegeven.
+Alle decks waar de ingelogde gebruiker toegang toe heeft (eigen + gedeeld), gesorteerd op aanmaakdatum (nieuwste eerst). Soft-deleted decks worden niet teruggegeven.
 
 **Response `200`:**
 ```json
@@ -242,10 +242,17 @@ Alle decks van de ingelogde gebruiker, gesorteerd op aanmaakdatum (nieuwste eers
     "tags": ["frans", "vocabulaire"],
     "created_at": "2024-01-01T00:00:00.000Z",
     "updated_at": "2024-01-02T00:00:00.000Z",
-    "deleted_at": null
+    "deleted_at": null,
+    "role": "owner",              // "owner" | "recipient" — puur weergave
+    "owner_username": "niels",    // username van de eigenaar
+    "can_edit": true              // stuurt ALLE bewerk-guards in de client
   }
 ]
 ```
+
+> **`role` / `owner_username` / `can_edit`** (sinds de sharing-release): `can_edit` is de capability-vlag waar de client zijn bewerk-UI en write-queue-guards op stuurt — nu altijd gelijk aan "ben ik de eigenaar", maar een latere release kan hem voor groepsleden aanzetten zonder client-wijziging. `role`/`owner_username` zijn weergave (badge "gedeeld door X").
+>
+> **`inactive` voor recipients:** bij een gedeeld deck bevat `inactive` de archiefvlag van de **ontvanger zelf** (gezet via `PUT /decks/:id/share-state`), niet die van de eigenaar — archiveren van een gedeeld deck raakt de eigenaar dus niet, en andersom.
 
 > **`inactive`** (boolean, standaard `false`): een deck dat is "gearchiveerd". De client verbergt inactieve decks en sluit hun kaarten uit van de due/new-weergave. Sinds juli 2026 tellen **óók de core-kaarten** van een inactief deck **niet** meer mee: `/review/core`, `/review/core/summary` en `/review/core/scores` sluiten kaarten uit decks met `inactive = true` uit — analoog aan hoe kaarten in een soft-deleted deck al uit de core-stats vallen.
 >
@@ -842,7 +849,7 @@ Overzicht van alle decks met het aantal due kaarten en nieuwe kaarten. Handig vo
 ## Sync (`/sync`) 🔒
 
 ### GET `/sync/changes`
-Geeft alle decks, kaarten en voortgangsrecords terug die gewijzigd zijn na `since`. Inclusief soft-deleted items (zodat de client lokaal kan verwijderen). Gefilterd op de ingelogde gebruiker.
+Geeft alle decks, kaarten en voortgangsrecords terug die gewijzigd zijn na `since`. Inclusief soft-deleted items (zodat de client lokaal kan verwijderen). Omvat naast eigen decks ook **met mij gedeelde decks** (zie [Delen](#delen--publieke-bibliotheek-🔒)); progress blijft strikt van de ingelogde gebruiker.
 
 **Query params:**
 - `since` (optioneel) — ISO 8601 timestamp, bijv. `2026-05-01T00:00:00.000Z`
@@ -872,6 +879,9 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
       "created_at": "...",
       "updated_at": "...",
       "deleted_at": null,
+      "role": "owner",           // "owner" | "recipient"
+      "owner_username": "niels",
+      "can_edit": true,          // stuurt alle bewerk-guards in de client
       "core_total_count": "3",   // totaal aantal core-kaarten in het deck (is_core = true)
       "core_due_count": "1",     // core-kaarten met due_date <= vandaag
       "core_new_count": "1"      // core-kaarten die nog nooit beoordeeld zijn
@@ -901,9 +911,14 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
       "updated_at": "...",
       "deleted_at": null
     }
-  ]
+  ],
+  "removed_deck_ids": ["uuid"]
 }
 ```
+
+> **Gedeelde decks in de delta:** wordt een deck (opnieuw) met je gedeeld of voeg je een groepsdeck toe, dan komt het deck **én al zijn kaarten integraal** mee in de eerstvolgende delta — ook al zijn hun `updated_at`'s ouder dan `since` (het nieuw-gedeeld-venster kijkt naar de share-rij). Voor recipients bevat `inactive` de eigen archiefvlag (share-state), niet die van de eigenaar.
+>
+> **`removed_deck_ids`:** decks waarvoor de toegang sinds `since` is **ingetrokken** (revoke door de eigenaar, zelf ontvolgd, kick uit een groep, groep opgeheven). Er is dan geen tombstone — het deck bestaat nog bij de eigenaar. De client verwijdert deck + kaarten + eigen progress lokaal. Alleen decks zonder énige resterende toegangsbron staan erin. Bij `full_resync` is dit veld irrelevant (de client herbouwt toch alles). Oudere clients mogen het veld negeren.
 
 > **Progress-resets:** een progress-record met `deleted_at != null` betekent dat de voortgang van die kaart gereset is (via DELETE `/review/progress/:card_id`, mogelijk op een ander apparaat). Verwijder dan het lokale voortgangsrecord; de kaart telt weer als nieuw.
 
@@ -1258,9 +1273,130 @@ Accepteer een openstaand **inkomend** verzoek. `:id` = relatie-id.
 
 ---
 
+## Delen & publieke bibliotheek 🔒
+
+Decks worden **live** gedeeld — geen kopieën. Een recipient ziet hetzelfde deck en dezelfde kaarten als de eigenaar (read-only), met volledig eigen voortgang/scores (`user_card_progress` is per user). Eén toegangsmodel: een actieve rij in `deck_shares` = leestoegang, ongeacht de bron:
+
+- **`invited`** — door de eigenaar met een **geaccepteerd contact** gedeeld;
+- **`subscribed`** — zelf gevolgd (publiek deck);
+- **`group`** — zelf toegevoegd uit een groepscatalogus (zie [Groepen](#groepen-groups-🔒)).
+
+Een recipient mag: alles lezen, eigen progress schrijven/resetten, eigen stats loggen, zijn eigen archiefvlag zetten en zelf afhaken. Writes op deck/kaarten geven `404` (zelfde als "bestaat niet").
+
+### POST `/decks/:id/share`
+Deel een eigen deck met een geaccepteerd contact.
+
+**Request body:** `{ "recipient_id": "uuid" }` (het `user_id` uit het contact-object)
+
+- Alleen de eigenaar; onbekend/andermans deck → `404`.
+- `recipient_id` geen wederzijds geaccepteerd contact → `403` `{ "error": "not_a_contact" }`.
+- Jezelf → `400` `{ "error": "cannot_share_with_self" }`.
+- Her-delen na intrekken = upsert (share wordt weer actief).
+
+**Response `201`:** de share-rij. **Realtime:** `share_received` naar de ontvanger.
+
+### DELETE `/decks/:id/share/:recipient_id`
+Eigenaar trekt een directe share (invited/subscribed) in. Idempotent → `204`. De progress van de recipient op dit deck wordt soft-deleted (tenzij een groepsshare de toegang nog draagt). **Realtime:** `deck_removed` naar de recipient.
+
+### GET `/shares/sent`
+Actieve directe shares op mijn decks (om in te trekken): `[ { deck_id, deck_title, recipient_id, recipient_username, kind, created_at } ]`. Geen e-mailadressen. Groepsshares lopen via de groep.
+
+### GET `/decks/public`
+Publieke bibliotheek (discovery), gepagineerd. Eigen decks worden uitgesloten.
+
+**Query params:** `search` (ILIKE op titel + tags), `limit` (default 20, max 50), `offset`.
+
+**Response `200`:** `[ { id, title, description, tags, created_at, owner_username, card_count } ]`
+
+### POST `/decks/:id/follow` / DELETE `/decks/:id/follow`
+Publiek deck volgen (`201`, share `kind: "subscribed"`) of een gedeeld deck van je dashboard halen (`204`). Follow op een niet-publiek/onbekend/eigen deck → `404`. **Unfollow geldt voor élke bron** (invited, subscribed én group) — een ontvanger mag altijd zelf afhaken; een groepsdeck is daarna opnieuw uit de catalogus toe te voegen. Eigen progress op het deck wordt bij unfollow soft-deleted.
+
+### PUT `/decks/:id/share-state`
+Archiefvlag van de **ontvanger** op een gedeeld deck (het enige dat een recipient "schrijft").
+
+**Request body:** `{ "inactive": true }` → **Response `200`:** `{ "deck_id": "…", "inactive": true }`. Geen actieve share → `404`. **Realtime:** `shared_deck_state` naar eigen andere devices.
+
+> Zet de eigenaar `is_public` uit, dan behouden bestaande volgers hun toegang (alleen nieuwe volgers worden geblokkeerd); intrekken kan per recipient via `DELETE /decks/:id/share/:recipient_id`.
+
+---
+
+## Groepen (`/groups`) 🔒
+
+Besloten clubs met een deelbare **join-code** (identificatie, niet geheim) en een **join-wachtwoord** (geheim, argon2-gehasht). Elke groep heeft een **deck-catalogus**: leden met `can_add_decks` zetten er eigen decks in, en elk lid kiest zélf welke catalogus-decks hij aan zijn dashboard toevoegt (opt-in) — pas dát geeft toegang (share `kind: "group"`).
+
+**Online-only, zoals contacten:** groepen zitten **niet** in de sync-delta. De client leest `GET /groups` en verwerkt mutaties via de WS-events `group_updated` / `group_invite_received` / `group_removed`. In group-responses staan **nooit e-mailadressen** — alleen `user_id` + `username`.
+
+### Het group-object
+
+Eén canonieke vorm voor alle kijkers; de client leidt zijn eigen rol/rechten af uit `members[]` (hij kent zijn eigen `user_id`):
+
+```json
+{
+  "id": "uuid",
+  "name": "Studieclub",
+  "description": null,
+  "join_code": "K7NPQ2WX",
+  "owner_id": "uuid",
+  "created_at": "…",
+  "updated_at": "…",
+  "members": [
+    { "user_id": "uuid", "username": "niels", "role": "owner",
+      "status": "active", "can_add_decks": true, "created_at": "…" }
+  ],
+  "decks": [
+    { "deck_id": "uuid", "title": "Frans", "description": null,
+      "added_by": "uuid", "added_by_username": "anna",
+      "added_at": "…", "card_count": "42" }
+  ]
+}
+```
+
+`status`: `"active"` of `"invited"` (aanvraag wacht op acceptatie). Het join-wachtwoord(-hash) komt nooit in een response.
+
+### GET `/groups`
+Alle groepen waar ik lid van ben, inclusief openstaande invites (mijn member-rij heeft dan `status: "invited"`).
+
+### POST `/groups`
+`{ "name": "…", "password": "…", "description?": "…" }` → `201` group-object. Wachtwoord min. 8 tekens. De maker wordt owner; de response bevat de gegenereerde `join_code`.
+
+### POST `/groups/join`
+`{ "code": "K7NPQ2WX", "password": "…" }` → `201` group-object. Onbekende code **én** fout wachtwoord geven allebei `404` `{ "error": "group_not_found" }` (geen onderscheid). Al lid → `409` `{ "error": "already_member" }`. Een openstaande invite wordt door een geslaagde join geactiveerd. **Zwaar rate-limited** (zelfde profiel als `/auth`). **Realtime:** `group_updated` naar alle leden.
+
+### PUT `/groups/:id`
+Owner: `{ "name?", "description?" }` → `200` group-object. **Realtime:** `group_updated`.
+
+### PUT `/groups/:id/password`
+Owner: `{ "password": "…" }` → `200`. Wissel het wachtwoord na een kick — anders joint het ex-lid gewoon opnieuw (de join-code blijft gelijk).
+
+### DELETE `/groups/:id`
+Owner heft de groep op → `204`. Alle groepsshares worden gerevoket (+ progress-cascade waar het de laatste toegangsbron was). **Realtime:** `group_removed` naar alle leden, `deck_removed` naar getroffen recipients.
+
+### POST `/groups/:id/invites`
+Actief lid nodigt een **eigen geaccepteerd contact** uit: `{ "user_id": "uuid" }` → `201`. Geen contact → `403` `{ "error": "not_a_contact" }`; al lid/uitgenodigd → `409`. **Realtime:** `group_invite_received` naar het doelwit, `group_updated` naar de leden.
+
+### POST `/groups/:id/invites/accept` / DELETE `/groups/:id/invites`
+De uitgenodigde accepteert (→ `200` group-object, lid wordt `active`) of wijst af (→ `204`, member-rij hard verwijderd). **Realtime:** `group_updated` resp. `group_removed` (eigen devices) + `group_updated` (leden).
+
+### PUT `/groups/:id/members/:user_id`
+Owner zet bevoegdheden: `{ "can_add_decks": false }` → `200` group-object. Niet op de owner zelf (→ `404`).
+
+### DELETE `/groups/:id/members/:user_id`
+Owner kickt een lid, óf een lid verlaat zelf (`:user_id` = eigen id) → `204`. De owner zelf → `400` `{ "error": "owner_cannot_leave" }` (die heft de groep op). Gevolgen: de groepsshares van het lid worden gerevoket **en zijn eigen toegevoegde decks gaan mee de groep uit** (incl. revoke bij alle leden). **Realtime:** `group_removed` naar het lid, `group_updated` naar de rest, `deck_removed` waar toegang verviel. De UI hoort de owner na een kick aan het wachtwoord-wisselen te herinneren.
+
+### POST `/groups/:id/decks`
+Actief lid met `can_add_decks` zet een **eigen** deck in de catalogus: `{ "deck_id": "uuid" }` → `201` group-object. Geen bevoegdheid → `403`; andermans/onbekend deck → `404`; al in de catalogus → `409`. **Realtime:** `group_updated`.
+
+### DELETE `/groups/:id/decks/:deck_id`
+De toevoeger (eigen deck terugtrekken) of de group-owner haalt een deck uit de catalogus → `204`. Revoket de groepsshares van alle leden op dit deck. **Realtime:** `group_updated` + `deck_removed`.
+
+### POST `/groups/:id/decks/:deck_id/add`
+Actief lid voegt een catalogus-deck aan zijn **eigen dashboard** toe → `201` share-rij (`kind: "group"`). Eigen deck → `400` `{ "error": "own_deck" }`. Het deck komt daarna binnen via de normale sync; weghalen = `DELETE /decks/:id/follow`.
+
+---
+
 ## WebSocket (`/ws`)
 
-Realtime push-notificaties voor alle schrijfoperaties. De server broadcast naar alle open verbindingen van dezelfde gebruiker.
+Realtime push-notificaties voor alle schrijfoperaties. De server broadcast naar alle open verbindingen van dezelfde gebruiker. **Deck- en kaart-events fannen sinds de sharing-release ook uit naar alle actieve recipients** van het betreffende deck (`deck_updated`, `deck_deleted`, `card_created/updated/deleted`); `deck_created` en alle progress-/stats-events blijven per-user.
 
 ### Verbinding maken
 
@@ -1301,7 +1437,15 @@ Bulk-endpoints sturen dus **één** event met alle items in de array (geen event
 | `contact_invited` | POST `/contacts`                     | contact-object (perspectief per ontvangende gebruiker) |
 | `contact_accepted`| POST `/contacts/:id/accept`          | contact-object (`accepted`, perspectief per ontvanger) |
 | `contact_rejected`| DELETE `/contacts/:id`               | `{ "id": "<relatie-id>" }`       |
+| `share_received`  | POST `/decks/:id/share` (naar de ontvanger) | `{ "deck_id", "title", "owner_username" }` — hint; het deck zelf komt via de sync |
+| `deck_removed`    | toegang verloren: share ingetrokken, ontvolgd, kick, deck uit catalogus, groep opgeheven | `{ "id": "<deck-id>" }` — client verwijdert deck + kaarten + eigen progress lokaal |
+| `shared_deck_state` | PUT `/decks/:id/share-state` (eigen andere devices) | `{ "id": "<deck-id>", "inactive": bool }` |
+| `group_updated`   | elke groepsmutatie (join, invite, leden, bevoegdheden, catalogus, naam) — naar alle leden | volledig group-object (client upsert zijn Hive-box) |
+| `group_invite_received` | POST `/groups/:id/invites` (naar het doelwit) | volledig group-object (eigen member-rij heeft `status: "invited"`) |
+| `group_removed`   | je bent geen lid meer (kick, zelf verlaten, invite afgewezen, groep opgeheven) | `{ "id": "<group-id>" }` |
 
+> **Let op — gedeelde decks:** de payload van `deck_updated`/`card_*` is de kale DB-rij (eigenaar-perspectief) en bevat **geen** `role`/`can_edit`/recipient-`inactive`. Een recipient-client moet die velden bij de merge uit zijn lokale deck behouden (de sync levert ze wél volledig geshaped).
+>
 > **Let op:** de payload-items van `core_set` en `progress_deleted` zijn voortgangsobjecten en bevatten dus **geen** `deck_id` — wel `card_id`. Clients die het bijbehorende deck nodig hebben, moeten dat lokaal opzoeken via de kaart. Bij `progress_deleted` bevatten de overige velden nog de oude waarden van vóór de reset; alleen de verwijdering toepassen.
 
 ### Ping/pong en berichten van de client

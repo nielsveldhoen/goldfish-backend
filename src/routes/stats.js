@@ -3,6 +3,7 @@ import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { SYNC_WATERMARK_OVERLAP_SECONDS } from "../config/retention.js";
 import { invalidCounterDelta, invalidTotal, invalidAvg, invalidDate, firstError } from "../utils/validate.js";
+import { canReadDeckSql } from "../utils/deckAccess.js";
 
 const router = express.Router();
 
@@ -92,12 +93,15 @@ router.post("/update", authMiddleware, async (req, res) => {
   } = deck_delta;
 
   try {
-    const ownerCheck = await pool.query(
-      `SELECT id FROM decks WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+    // Toegang i.p.v. eigendom: recipients trainen gedeelde decks en loggen
+    // daar hun eigen stats op (deck_stats is user_id-gescoped).
+    const accessCheck = await pool.query(
+      `SELECT d.id FROM decks d
+       WHERE d.id = $1 AND ${canReadDeckSql("d", "$2")} AND d.deleted_at IS NULL`,
       [deck_id, req.user.id]
     );
 
-    if (ownerCheck.rowCount === 0) {
+    if (accessCheck.rowCount === 0) {
       return res.status(403).json({ error: "Not allowed" });
     }
 
@@ -277,9 +281,9 @@ router.get("/decks", authMiddleware, async (req, res) => {
 
   try {
     const decksResult = await pool.query(
-      `SELECT id FROM decks
-       WHERE user_id = $1 AND deleted_at IS NULL
-       ${deckIds ? "AND id = ANY($2::uuid[])" : ""}`,
+      `SELECT d.id FROM decks d
+       WHERE ${canReadDeckSql("d", "$1")} AND d.deleted_at IS NULL
+       ${deckIds ? "AND d.id = ANY($2::uuid[])" : ""}`,
       deckIds ? [req.user.id, deckIds] : [req.user.id]
     );
 

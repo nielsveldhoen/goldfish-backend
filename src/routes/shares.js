@@ -1,0 +1,364 @@
+// Deck-sharing-routes (SHARING_PLAN.md, Release A): delen met contacten,
+// publieke bibliotheek + volgen, share-state van de ontvanger. Dit router
+// wordt in app.js vóór het decks-router gemount zodat GET /decks/public niet
+// door GET /decks/:id wordt opgeslokt.
+import express from "express";
+import rateLimit from "express-rate-limit";
+import { pool } from "../db.js";
+import { authMiddleware } from "../middleware/auth.js";
+import { broadcast, broadcastDeck } from "../ws.js";
+import { LIMITS } from "../utils/validate.js";
+import { canWriteDeckSql, revokeShares } from "../utils/deckAccess.js";
+
+const router = express.Router();
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Publieke discovery is de duurste read (ILIKE over alle publieke decks);
+// zelfde profiel als de auth-limiter.
+const publicSearchLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 120,
+  message: { error: "Too many attempts, try again later" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const PUBLIC_PAGE_MAX = 50;
+
+// Meldt aan de recipient (al zijn devices) dat een deck van zijn dashboard
+// verdween. Fire-and-forget: WS-bezorging mag de response nooit ophouden.
+function notifyRemoved(removedPairs) {
+  for (const { deck_id, recipient_id } of removedPairs) {
+    broadcast(recipient_id, "deck_removed", [{ id: deck_id }]);
+  }
+}
+
+// ========================
+// POST /decks/:id/share — delen met een geaccepteerd contact
+// ========================
+router.post("/decks/:id/share", authMiddleware, async (req, res) => {
+  const { id } = req.params;
+  const { recipient_id } = req.body;
+
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Deck not found" });
+  }
+  if (typeof recipient_id !== "string" || !UUID_RE.test(recipient_id)) {
+    return res.status(400).json({ error: "recipient_id is required" });
+  }
+  if (recipient_id === req.user.id) {
+    return res.status(400).json({ error: "cannot_share_with_self" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Alleen de eigenaar deelt; onbekend/andermans deck → 404 (zoals PUT).
+    const deckCheck = await client.query(
+      `SELECT d.id, d.title FROM decks d
+       WHERE d.id = $1 AND ${canWriteDeckSql("d", "$2")} AND d.deleted_at IS NULL`,
+      [id, req.user.id]
+    );
+    if (deckCheck.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Deck not found" });
+    }
+
+    // Delen kan alleen met een wederzijds geaccepteerd contact — dat is de
+    // hele reden dat delen-op-e-mail (en anti-enumeratie) niet meer nodig is.
+    const contactCheck = await client.query(
+      `SELECT 1 FROM contacts
+       WHERE status = 'accepted'
+         AND least(requester_id, addressee_id) = least($1::uuid, $2::uuid)
+         AND greatest(requester_id, addressee_id) = greatest($1::uuid, $2::uuid)`,
+      [req.user.id, recipient_id]
+    );
+    if (contactCheck.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "not_a_contact" });
+    }
+
+    // Upsert op de directe rij: her-delen na revoke maakt de share weer
+    // actief (updated_at = NOW() → valt in het nieuw-gedeeld-venster van
+    // /sync/changes, dus de recipient krijgt deck + kaarten integraal).
+    const share = await client.query(
+      `INSERT INTO deck_shares (deck_id, owner_id, recipient_id, kind)
+       VALUES ($1, $2, $3, 'invited')
+       ON CONFLICT (deck_id, recipient_id) WHERE group_id IS NULL
+       DO UPDATE SET revoked_at = NULL, inactive = false, kind = 'invited', updated_at = NOW()
+       RETURNING *`,
+      [id, req.user.id, recipient_id]
+    );
+
+    await client.query("COMMIT");
+
+    const meRes = await pool.query(`SELECT username FROM users WHERE id = $1`, [req.user.id]);
+    broadcast(recipient_id, "share_received", [
+      { deck_id: id, title: deckCheck.rows[0].title, owner_username: meRes.rows[0].username },
+    ]);
+
+    res.status(201).json(share.rows[0]);
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
+  }
+});
+
+// ========================
+// DELETE /decks/:id/share/:recipient_id — owner trekt een directe share in
+// ========================
+router.delete("/decks/:id/share/:recipient_id", authMiddleware, async (req, res) => {
+  const { id, recipient_id } = req.params;
+
+  if (!UUID_RE.test(id) || !UUID_RE.test(recipient_id)) {
+    return res.status(404).json({ error: "Share not found" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Owner-check via de deck-rij (share-rijen dragen owner_id, maar de
+    // deck-rij is de waarheid). Deck mag soft-deleted zijn: intrekken van een
+    // share op een verwijderd deck is gewoon opruimen.
+    const deckCheck = await client.query(
+      `SELECT d.id FROM decks d WHERE d.id = $1 AND ${canWriteDeckSql("d", "$2")}`,
+      [id, req.user.id]
+    );
+    if (deckCheck.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Share not found" });
+    }
+
+    // Alleen de directe rij (invited/subscribed); groepsshares beheert de
+    // groep (deck uit de catalogus halen).
+    const removed = await revokeShares(client, {
+      deckId: id,
+      recipientId: recipient_id,
+      directOnly: true,
+    });
+
+    await client.query("COMMIT");
+
+    // Idempotent: bestond de share niet (meer), dan is het doel al bereikt.
+    // removed is leeg wanneer een groepsshare de toegang nog draagt — dan
+    // blijft het deck bij de recipient staan en is er niets te melden.
+    notifyRemoved(removed);
+    res.status(204).end();
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
+  }
+});
+
+// ========================
+// GET /shares/sent — wie heeft toegang tot mijn decks (directe shares)
+// ========================
+// Usernames, geen e-mailadressen. Groepsshares lopen via de groep zelf.
+router.get("/shares/sent", authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT s.deck_id, d.title AS deck_title, s.recipient_id,
+              u.username AS recipient_username, s.kind, s.created_at
+       FROM deck_shares s
+       JOIN decks d ON d.id = s.deck_id
+       JOIN users u ON u.id = s.recipient_id
+       WHERE s.owner_id = $1
+         AND s.revoked_at IS NULL
+         AND s.group_id IS NULL
+         AND d.deleted_at IS NULL
+       ORDER BY d.title ASC, u.username ASC`,
+      [req.user.id]
+    );
+
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ========================
+// GET /decks/public — publieke bibliotheek (discovery, gepagineerd)
+// ========================
+// Staat vóór GET /decks/:id (routevolgorde: dit router mount eerst in app.js).
+// Eigen decks worden uitgesloten — die staan al op het dashboard.
+router.get("/decks/public", authMiddleware, publicSearchLimiter, async (req, res) => {
+  const { search } = req.query;
+
+  let limit = Number(req.query.limit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > PUBLIC_PAGE_MAX) limit = 20;
+  let offset = Number(req.query.offset);
+  if (!Number.isInteger(offset) || offset < 0) offset = 0;
+
+  if (search !== undefined && (typeof search !== "string" || search.length > LIMITS.TITLE_MAX)) {
+    return res.status(400).json({ error: "Invalid search" });
+  }
+
+  const params = [req.user.id];
+  let searchCond = "";
+  if (search) {
+    params.push(`%${search.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`);
+    searchCond = `AND (d.title ILIKE $${params.length}
+                   OR EXISTS (SELECT 1 FROM unnest(d.tags) t WHERE t ILIKE $${params.length}))`;
+  }
+  params.push(limit, offset);
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT d.id, d.title, d.description, d.tags, d.created_at,
+              u.username AS owner_username,
+              (SELECT COUNT(*) FROM cards c
+               WHERE c.deck_id = d.id AND c.deleted_at IS NULL) AS card_count
+       FROM decks d
+       JOIN users u ON u.id = d.user_id
+       WHERE d.is_public = true
+         AND d.deleted_at IS NULL
+         AND d.user_id <> $1
+         ${searchCond}
+       ORDER BY d.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
+
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ========================
+// POST /decks/:id/follow — publiek deck volgen
+// ========================
+router.post("/decks/:id/follow", authMiddleware, async (req, res) => {
+  const { id } = req.params;
+
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Deck not found" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Alleen levende, publieke decks van iemand anders; anders 404 (geen
+    // onderscheid tussen "bestaat niet" en "niet publiek").
+    const deckCheck = await client.query(
+      `SELECT user_id FROM decks
+       WHERE id = $1 AND is_public = true AND deleted_at IS NULL AND user_id <> $2`,
+      [id, req.user.id]
+    );
+    if (deckCheck.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Deck not found" });
+    }
+
+    const share = await client.query(
+      `INSERT INTO deck_shares (deck_id, owner_id, recipient_id, kind)
+       VALUES ($1, $2, $3, 'subscribed')
+       ON CONFLICT (deck_id, recipient_id) WHERE group_id IS NULL
+       DO UPDATE SET revoked_at = NULL, inactive = false, updated_at = NOW()
+       RETURNING *`,
+      [id, deckCheck.rows[0].user_id, req.user.id]
+    );
+
+    await client.query("COMMIT");
+
+    res.status(201).json(share.rows[0]);
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
+  }
+});
+
+// ========================
+// DELETE /decks/:id/follow — recipient haalt het deck van zijn dashboard
+// ========================
+// Geldt voor élke bron (invited, subscribed én group): een ontvanger mag
+// altijd zelf afhaken. Een groepsdeck kan daarna opnieuw uit de catalogus
+// worden toegevoegd.
+router.delete("/decks/:id/follow", authMiddleware, async (req, res) => {
+  const { id } = req.params;
+
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Deck not found" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const removed = await revokeShares(client, { deckId: id, recipientId: req.user.id });
+
+    await client.query("COMMIT");
+
+    if (removed.length === 0) {
+      return res.status(404).json({ error: "Deck not found" });
+    }
+
+    // Eigen andere devices ruimen het deck ook op.
+    notifyRemoved(removed);
+    res.status(204).end();
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
+  }
+});
+
+// ========================
+// PUT /decks/:id/share-state — archiefvlag van de ONTVANGER
+// ========================
+// Het enige dat een recipient aan een gedeeld deck "schrijft". Zet de vlag op
+// al zijn actieve share-rijen tegelijk (contact- én groepsbron), zodat de
+// effectieve inactive (bool_and) eenduidig blijft.
+router.put("/decks/:id/share-state", authMiddleware, async (req, res) => {
+  const { id } = req.params;
+  const { inactive } = req.body;
+
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Deck not found" });
+  }
+  if (typeof inactive !== "boolean") {
+    return res.status(400).json({ error: "inactive must be a boolean" });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE deck_shares
+       SET inactive = $1, updated_at = NOW()
+       WHERE deck_id = $2 AND recipient_id = $3 AND revoked_at IS NULL
+       RETURNING deck_id, inactive`,
+      [inactive, id, req.user.id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Deck not found" });
+    }
+
+    // Andere devices van de recipient zien de vlag via de sync (share.updated_at
+    // valt in de delta) — en direct via een lichte deck_updated-hint.
+    broadcast(req.user.id, "shared_deck_state", [{ id, inactive }]);
+
+    res.json({ deck_id: id, inactive });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+export default router;

@@ -28,10 +28,38 @@ export async function purgeTombstones(retentionDays = TOMBSTONE_RETENTION_DAYS) 
          AND deleted_at < now() - ($1 || ' days')::interval`,
       [days]
     );
+    // Share- en catalogusrijen die naar te purgen decks verwijzen eerst weg
+    // (FK's zonder cascade). Daarnaast: gerevokete shares ouder dan de
+    // retentie zijn als removed_deck_ids-bron uitgewerkt (de resync-horizon
+    // is korter) en mogen dus ook weg.
+    const shares = await client.query(
+      `DELETE FROM deck_shares
+       WHERE deck_id IN (SELECT id FROM decks
+                         WHERE deleted_at IS NOT NULL
+                           AND deleted_at < now() - ($1 || ' days')::interval)
+          OR (revoked_at IS NOT NULL
+              AND revoked_at < now() - ($1 || ' days')::interval)`,
+      [days]
+    );
+    await client.query(
+      `DELETE FROM group_decks
+       WHERE deck_id IN (SELECT id FROM decks
+                         WHERE deleted_at IS NOT NULL
+                           AND deleted_at < now() - ($1 || ' days')::interval)`,
+      [days]
+    );
     const decks = await client.query(
       `DELETE FROM decks
        WHERE deleted_at IS NOT NULL
          AND deleted_at < now() - ($1 || ' days')::interval`,
+      [days]
+    );
+    // Soft-deleted groepen waarvan geen share-rij meer bestaat mogen hard weg.
+    const groups = await client.query(
+      `DELETE FROM groups g
+       WHERE g.deleted_at IS NOT NULL
+         AND g.deleted_at < now() - ($1 || ' days')::interval
+         AND NOT EXISTS (SELECT 1 FROM deck_shares s WHERE s.group_id = g.id)`,
       [days]
     );
 
@@ -53,6 +81,7 @@ export async function purgeTombstones(retentionDays = TOMBSTONE_RETENTION_DAYS) 
     console.log(
       `[purgeTombstones] purged progress=${progress.rowCount}, ` +
         `cards=${cards.rowCount}, decks=${decks.rowCount}, ` +
+        `shares=${shares.rowCount}, groups=${groups.rowCount}, ` +
         `expired auth tokens=${expiredAuthTokens} (retention ${days}d)`
     );
 
@@ -60,6 +89,8 @@ export async function purgeTombstones(retentionDays = TOMBSTONE_RETENTION_DAYS) 
       progress: progress.rowCount,
       cards: cards.rowCount,
       decks: decks.rowCount,
+      shares: shares.rowCount,
+      groups: groups.rowCount,
       expiredAuthTokens,
     };
   } catch (err) {

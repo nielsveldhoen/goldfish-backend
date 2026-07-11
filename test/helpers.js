@@ -52,7 +52,43 @@ export async function createProgress(userId, cardId) {
   return result.rows[0];
 }
 
+// Wederzijds geaccepteerd contact tussen twee users (voorwaarde voor delen).
+export async function createContact(userIdA, userIdB, status = "accepted") {
+  const result = await pool.query(
+    `INSERT INTO contacts (requester_id, addressee_id, status)
+     VALUES ($1, $2, $3) RETURNING *`,
+    [userIdA, userIdB, status]
+  );
+  return result.rows[0];
+}
+
 export async function cleanupUser(userId) {
+  // Sharing/groepen eerst: deck_shares en group_decks hebben FK's zonder
+  // cascade naar decks, en deck_shares.group_id verwijst naar groups.
+  await pool.query(
+    `DELETE FROM deck_shares
+     WHERE owner_id = $1 OR recipient_id = $1
+        OR deck_id IN (SELECT id FROM decks WHERE user_id = $1)
+        OR group_id IN (SELECT id FROM groups WHERE owner_id = $1)`,
+    [userId]
+  );
+  await pool.query(
+    `DELETE FROM group_decks
+     WHERE added_by = $1
+        OR deck_id IN (SELECT id FROM decks WHERE user_id = $1)
+        OR group_id IN (SELECT id FROM groups WHERE owner_id = $1)`,
+    [userId]
+  );
+  await pool.query(
+    `DELETE FROM group_members
+     WHERE user_id = $1 OR group_id IN (SELECT id FROM groups WHERE owner_id = $1)`,
+    [userId]
+  );
+  await pool.query(`DELETE FROM groups WHERE owner_id = $1`, [userId]);
+  await pool.query(
+    `DELETE FROM contacts WHERE requester_id = $1 OR addressee_id = $1`,
+    [userId]
+  );
   await pool.query(`DELETE FROM user_card_progress WHERE user_id = $1`, [userId]);
   await pool.query(`DELETE FROM deck_stats WHERE user_id = $1`, [userId]);
   await pool.query(`DELETE FROM user_daily_snapshot WHERE user_id = $1`, [userId]);

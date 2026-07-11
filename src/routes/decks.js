@@ -1,8 +1,15 @@
 import express from "express";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
-import { broadcast } from "../ws.js";
+import { broadcast, broadcastDeck } from "../ws.js";
 import { LIMITS, invalidString, invalidBoolean, invalidTags, firstError } from "../utils/validate.js";
+import {
+  canReadDeckSql,
+  canWriteDeckSql,
+  deckShareColumnsSql,
+  ownerJoinSql,
+  shapeDeckRow,
+} from "../utils/deckAccess.js";
 
 const router = express.Router();
 
@@ -24,19 +31,21 @@ function invalidDeckFields({ title, description, tags, is_public, inactive, core
 const MAX_BULK_DECKS = 100;
 
 // ========================
-// GET ALL DECKS (van user)
+// GET ALL DECKS (eigen + met mij gedeeld)
 // ========================
 router.get("/", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT * FROM decks
-       WHERE user_id = $1
-         AND deleted_at IS NULL
-       ORDER BY created_at DESC`,
+      `SELECT d.*, ${deckShareColumnsSql("d", "$1")}
+       FROM decks d
+       ${ownerJoinSql("d")}
+       WHERE ${canReadDeckSql("d", "$1")}
+         AND d.deleted_at IS NULL
+       ORDER BY d.created_at DESC`,
       [req.user.id]
     );
 
-    res.json(result.rows);
+    res.json(result.rows.map(shapeDeckRow));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });
@@ -57,8 +66,10 @@ router.get("/:id", authMiddleware, async (req, res) => {
 
   try {
     const result = await pool.query(
-      `SELECT * FROM decks
-       WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+      `SELECT d.*, ${deckShareColumnsSql("d", "$2")}
+       FROM decks d
+       ${ownerJoinSql("d")}
+       WHERE d.id = $1 AND ${canReadDeckSql("d", "$2")} AND d.deleted_at IS NULL`,
       [id, req.user.id]
     );
 
@@ -68,7 +79,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Deck not found" });
     }
 
-    res.json(deck);
+    res.json(shapeDeckRow(deck));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });
@@ -142,8 +153,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
     await client.query("BEGIN");
 
     const current = await client.query(
-      `SELECT * FROM decks WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-       FOR UPDATE`,
+      `SELECT d.*, _ou.username AS owner_username FROM decks d
+       ${ownerJoinSql("d")}
+       WHERE d.id = $1 AND ${canWriteDeckSql("d", "$2")} AND d.deleted_at IS NULL
+       FOR UPDATE OF d`,
       [id, req.user.id]
     );
 
@@ -152,22 +165,25 @@ router.put("/:id", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Deck not found" });
     }
 
-    const deck = current.rows[0];
+    const { owner_username, ...deck } = current.rows[0];
+    // Alleen de schrijver (owner) komt hier; shape zoals GET /decks/:id zodat
+    // de client één deck-vorm kent (óók in de 409-current).
+    const shape = (row) => ({ ...row, role: "owner", owner_username, can_edit: true });
 
     if (client_updated_at && deck.updated_at > new Date(client_updated_at)) {
       await client.query("ROLLBACK");
-      return res.status(409).json({ error: "stale_write", current: deck });
+      return res.status(409).json({ error: "stale_write", current: shape(deck) });
     }
 
     const result = await client.query(
-      `UPDATE decks
+      `UPDATE decks d
        SET title = $1,
            description = $2,
            is_public = $3,
            tags = $4,
            inactive = $5,
            core_only = $6
-       WHERE id = $7 AND user_id = $8
+       WHERE d.id = $7 AND ${canWriteDeckSql("d", "$8")}
        RETURNING *`,
       [
         title ?? deck.title,
@@ -184,8 +200,12 @@ router.put("/:id", authMiddleware, async (req, res) => {
     await client.query("COMMIT");
 
     const updated = result.rows[0];
-    broadcast(req.user.id, "deck_updated", updated);
-    res.json(updated);
+    // Ook recipients zien de wijziging live. De payload is de kale deck-rij
+    // (owner-perspectief); de client behoudt bij de merge zijn eigen
+    // role/can_edit/inactive-velden.
+    broadcastDeck(id, "deck_updated", updated)
+      .catch((err) => console.error("[decks] broadcast failed:", err));
+    res.json(shape(updated));
 
   } catch (err) {
     await client.query("ROLLBACK");
@@ -236,8 +256,10 @@ router.delete("/:id", authMiddleware, async (req, res) => {
     await client.query("COMMIT");
 
     // deleted_at mee in de payload: broadcast() gebruikt de DB-timestamp als
-    // server_time, zodat WS- en REST-sync dezelfde klokbron delen.
-    broadcast(req.user.id, "deck_deleted", { id, deleted_at: result.rows[0].deleted_at });
+    // server_time, zodat WS- en REST-sync dezelfde klokbron delen. Recipients
+    // zien het deck zo ook meteen verdwijnen.
+    broadcastDeck(id, "deck_deleted", { id, deleted_at: result.rows[0].deleted_at })
+      .catch((err) => console.error("[decks] broadcast failed:", err));
     res.json({ message: "Deck deleted" });
 
   } catch (err) {
@@ -301,7 +323,13 @@ router.post("/bulk-delete", authMiddleware, async (req, res) => {
 
     await client.query("COMMIT");
 
+    // Owner (alle devices) krijgt de hele batch in één event; recipients per
+    // deck apart — de ontvangerskring verschilt per deck.
     broadcast(req.user.id, "deck_deleted", result.rows);
+    for (const row of result.rows) {
+      broadcastDeck(row.id, "deck_deleted", [row], { excludeUserId: req.user.id })
+        .catch((err) => console.error("[decks] broadcast failed:", err));
+    }
     res.json({ deleted: result.rowCount, ids: result.rows.map((r) => r.id) });
 
   } catch (err) {

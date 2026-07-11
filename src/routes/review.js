@@ -4,6 +4,7 @@ import { authMiddleware } from "../middleware/auth.js";
 import { broadcast } from "../ws.js";
 import { SYNC_RESYNC_HORIZON_DAYS, SYNC_WATERMARK_OVERLAP_SECONDS } from "../config/retention.js";
 import { LIMITS, invalidString, invalidBoolean, invalidScore, invalidDate, firstError } from "../utils/validate.js";
+import { canReadDeckSql, effectiveInactiveSql, ownerJoinSql } from "../utils/deckAccess.js";
 
 const router = express.Router();
 
@@ -79,7 +80,7 @@ router.get("/new", authMiddleware, async (req, res) => {
          AND ucp.user_id = $1
          AND ucp.deleted_at IS NULL
        WHERE c.deck_id = $2
-         AND d.user_id = $1
+         AND ${canReadDeckSql("d", "$1")}
          AND c.deleted_at IS NULL
          AND d.deleted_at IS NULL
          AND (ucp.id IS NULL OR ucp.repetitions = '')
@@ -116,7 +117,7 @@ router.get("/deck/:deck_id", authMiddleware, async (req, res) => {
          AND ucp.user_id = $1
          AND ucp.deleted_at IS NULL
        WHERE c.deck_id = $2
-         AND d.user_id = $1
+         AND ${canReadDeckSql("d", "$1")}
          AND c.deleted_at IS NULL
          AND d.deleted_at IS NULL`,
       [req.user.id, deck_id]
@@ -143,15 +144,16 @@ router.get("/deck/:deck_id/scores", authMiddleware, async (req, res) => {
 
   try {
     const deckCheck = await pool.query(
-      `SELECT user_id FROM decks WHERE id = $1 AND deleted_at IS NULL`,
-      [deck_id]
+      `SELECT ${canReadDeckSql("d", "$2")} AS has_access
+       FROM decks d WHERE d.id = $1 AND d.deleted_at IS NULL`,
+      [deck_id, req.user.id]
     );
 
     if (deckCheck.rowCount === 0) {
       return res.status(404).json({ error: "Deck not found" });
     }
 
-    if (deckCheck.rows[0].user_id !== req.user.id) {
+    if (!deckCheck.rows[0].has_access) {
       return res.status(403).json({ error: "Not allowed" });
     }
 
@@ -174,7 +176,7 @@ router.get("/deck/:deck_id/scores", authMiddleware, async (req, res) => {
          AND ucp.user_id = $1
          AND ucp.deleted_at IS NULL
        WHERE c.deck_id = $2
-         AND d.user_id = $1
+         AND ${canReadDeckSql("d", "$1")}
          AND c.deleted_at IS NULL
          AND d.deleted_at IS NULL
        ORDER BY c.id ASC`,
@@ -206,7 +208,7 @@ router.get("/progress/:card_id", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT c.id, c.deck_id, c.question, c.answer, c.created_at, c.updated_at,
-              d.user_id AS owner_id,
+              ${canReadDeckSql("d", "$1")} AS has_access,
               ucp.id AS progress_id, ucp.remote_score, ucp.stable_score, ucp.recent_score,
               ucp.due_date, ucp.repetitions, ucp.is_core, ucp.updated_at AS progress_updated_at
        FROM cards c
@@ -225,8 +227,8 @@ router.get("/progress/:card_id", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Card not found" });
     }
 
-    const { owner_id, ...row } = result.rows[0];
-    if (owner_id !== req.user.id) {
+    const { has_access, ...row } = result.rows[0];
+    if (!has_access) {
       return res.status(403).json({ error: "Not allowed" });
     }
 
@@ -281,15 +283,17 @@ router.post("/progress", authMiddleware, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    const ownerCheck = await client.query(
+    // Toegang i.p.v. eigendom: een recipient schrijft zijn éigen progress op
+    // een gedeeld deck (de write is user_id-gescoped, dus altijd de eigen rij).
+    const accessCheck = await client.query(
       `SELECT c.id FROM cards c
        JOIN decks d ON c.deck_id = d.id
-       WHERE c.id = $1 AND d.user_id = $2
+       WHERE c.id = $1 AND ${canReadDeckSql("d", "$2")}
          AND c.deleted_at IS NULL AND d.deleted_at IS NULL`,
       [card_id, req.user.id]
     );
 
-    if (ownerCheck.rowCount === 0) {
+    if (accessCheck.rowCount === 0) {
       await client.query("ROLLBACK");
       return res.status(403).json({ error: "Not allowed" });
     }
@@ -374,17 +378,17 @@ router.delete("/progress/:card_id", authMiddleware, async (req, res) => {
 
   try {
     const cardCheck = await pool.query(
-      `SELECT d.user_id FROM cards c
+      `SELECT ${canReadDeckSql("d", "$2")} AS has_access FROM cards c
        JOIN decks d ON c.deck_id = d.id
        WHERE c.id = $1 AND c.deleted_at IS NULL AND d.deleted_at IS NULL`,
-      [card_id]
+      [card_id, req.user.id]
     );
 
     if (cardCheck.rowCount === 0) {
       return res.status(404).json({ error: "Card not found" });
     }
 
-    if (cardCheck.rows[0].user_id !== req.user.id) {
+    if (!cardCheck.rows[0].has_access) {
       return res.status(403).json({ error: "Not allowed" });
     }
 
@@ -416,8 +420,11 @@ router.get("/decks/summary", authMiddleware, async (req, res) => {
         d.id,
         d.title,
         d.tags,
-        d.inactive,
+        ${effectiveInactiveSql("d", "$1")} AS inactive,
         d.created_at,
+        CASE WHEN d.user_id = $1 THEN 'owner' ELSE 'recipient' END AS role,
+        _ou.username AS owner_username,
+        (d.user_id = $1) AS can_edit,
 
         COUNT(ucp.card_id) FILTER (
           WHERE ucp.due_date <= CURRENT_DATE
@@ -454,17 +461,18 @@ router.get("/decks/summary", authMiddleware, async (req, res) => {
         ) AS last_reviewed_at
 
       FROM decks d
+      ${ownerJoinSql("d")}
       LEFT JOIN cards c ON c.deck_id = d.id
       LEFT JOIN user_card_progress ucp
         ON c.id = ucp.card_id
         AND ucp.user_id = $1
         AND ucp.deleted_at IS NULL
 
-      WHERE d.user_id = $1
+      WHERE ${canReadDeckSql("d", "$1")}
         AND d.deleted_at IS NULL
         AND (c.id IS NULL OR c.deleted_at IS NULL)
 
-      GROUP BY d.id
+      GROUP BY d.id, _ou.username
       ORDER BY d.created_at DESC`,
       [req.user.id]
     );
@@ -499,7 +507,7 @@ router.get("/core/summary", authMiddleware, async (req, res) => {
          AND ucp.deleted_at IS NULL
          AND c.deleted_at IS NULL
          AND d.deleted_at IS NULL
-         AND d.inactive = false`,
+         AND ${effectiveInactiveSql("d", "$1")} = false`,
       [req.user.id]
     );
 
@@ -574,7 +582,7 @@ router.get("/core", authMiddleware, async (req, res) => {
          AND ucp.deleted_at IS NULL
          AND c.deleted_at IS NULL
          AND d.deleted_at IS NULL
-         AND d.inactive = false
+         AND ${effectiveInactiveSql("d", "$1")} = false
        ORDER BY ucp.updated_at ASC`,
       [req.user.id, sinceDate]
     );
@@ -616,7 +624,7 @@ router.get("/core/scores", authMiddleware, async (req, res) => {
          AND ucp.deleted_at IS NULL
          AND c.deleted_at IS NULL
          AND d.deleted_at IS NULL
-         AND d.inactive = false
+         AND ${effectiveInactiveSql("d", "$1")} = false
        ORDER BY c.id ASC`,
       [req.user.id]
     );

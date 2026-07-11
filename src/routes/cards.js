@@ -1,8 +1,9 @@
 import express from "express";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
-import { broadcast } from "../ws.js";
+import { broadcast, broadcastDeck } from "../ws.js";
 import { LIMITS, invalidString, firstError } from "../utils/validate.js";
+import { canReadDeckSql, canWriteDeckSql } from "../utils/deckAccess.js";
 
 const router = express.Router();
 
@@ -39,7 +40,7 @@ router.get("/", authMiddleware, async (req, res) => {
       SELECT c.*
       FROM cards c
       JOIN decks d ON c.deck_id = d.id
-      WHERE d.user_id = $1
+      WHERE ${canReadDeckSql("d", "$1")}
         AND c.deleted_at IS NULL
         AND d.deleted_at IS NULL
     `;
@@ -82,7 +83,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
       `SELECT c.*
        FROM cards c
        JOIN decks d ON c.deck_id = d.id
-       WHERE c.id = $1 AND d.user_id = $2
+       WHERE c.id = $1 AND ${canReadDeckSql("d", "$2")}
          AND c.deleted_at IS NULL AND d.deleted_at IS NULL`,
       [id, req.user.id]
     );
@@ -125,8 +126,8 @@ router.post("/", authMiddleware, async (req, res) => {
 
   try {
     const deckCheck = await pool.query(
-      `SELECT id FROM decks
-       WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+      `SELECT d.id FROM decks d
+       WHERE d.id = $1 AND ${canWriteDeckSql("d", "$2")} AND d.deleted_at IS NULL`,
       [deck_id, req.user.id]
     );
 
@@ -142,7 +143,8 @@ router.post("/", authMiddleware, async (req, res) => {
     );
 
     const card = result.rows[0];
-    broadcast(req.user.id, "card_created", card);
+    broadcastDeck(deck_id, "card_created", card)
+      .catch((err) => console.error("[cards] broadcast failed:", err));
     res.status(201).json(card);
 
   } catch (err) {
@@ -185,7 +187,8 @@ router.post("/bulk", authMiddleware, async (req, res) => {
     await client.query("BEGIN");
 
     const deckCheck = await client.query(
-      `SELECT id FROM decks WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+      `SELECT d.id FROM decks d
+       WHERE d.id = $1 AND ${canWriteDeckSql("d", "$2")} AND d.deleted_at IS NULL`,
       [deck_id, req.user.id]
     );
 
@@ -217,7 +220,8 @@ router.post("/bulk", authMiddleware, async (req, res) => {
 
     await client.query("COMMIT");
 
-    broadcast(req.user.id, "card_created", created);
+    broadcastDeck(deck_id, "card_created", created)
+      .catch((err) => console.error("[cards] broadcast failed:", err));
     res.status(201).json(created);
 
   } catch (err) {
@@ -265,7 +269,7 @@ router.post("/bulk-delete", authMiddleware, async (req, res) => {
        FROM decks d
        WHERE c.id = ANY($1::uuid[])
          AND c.deck_id = d.id
-         AND d.user_id = $2
+         AND ${canWriteDeckSql("d", "$2")}
          AND c.deleted_at IS NULL
        RETURNING c.id, c.deck_id, c.deleted_at`,
       [ids, req.user.id]
@@ -284,7 +288,18 @@ router.post("/bulk-delete", authMiddleware, async (req, res) => {
 
     await client.query("COMMIT");
 
+    // Owner (alle devices) krijgt de hele batch; recipients per deck apart —
+    // de batch kan meerdere decks met verschillende ontvangers beslaan.
     broadcast(req.user.id, "card_deleted", result.rows);
+    const byDeck = new Map();
+    for (const row of result.rows) {
+      if (!byDeck.has(row.deck_id)) byDeck.set(row.deck_id, []);
+      byDeck.get(row.deck_id).push(row);
+    }
+    for (const [deckId, rows] of byDeck) {
+      broadcastDeck(deckId, "card_deleted", rows, { excludeUserId: req.user.id })
+        .catch((err) => console.error("[cards] broadcast failed:", err));
+    }
     res.json({ deleted: result.rowCount, ids: result.rows.map((r) => r.id) });
 
   } catch (err) {
@@ -323,7 +338,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
     const current = await client.query(
       `SELECT c.* FROM cards c
        JOIN decks d ON c.deck_id = d.id
-       WHERE c.id = $1 AND d.user_id = $2
+       WHERE c.id = $1 AND ${canWriteDeckSql("d", "$2")}
          AND c.deleted_at IS NULL AND d.deleted_at IS NULL
        FOR UPDATE OF c`,
       [id, req.user.id]
@@ -348,7 +363,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
        FROM decks d
        WHERE c.id = $3
          AND c.deck_id = d.id
-         AND d.user_id = $4
+         AND ${canWriteDeckSql("d", "$4")}
        RETURNING c.*`,
       [
         question ?? card.question,
@@ -361,7 +376,8 @@ router.put("/:id", authMiddleware, async (req, res) => {
     await client.query("COMMIT");
 
     const updated = result.rows[0];
-    broadcast(req.user.id, "card_updated", updated);
+    broadcastDeck(updated.deck_id, "card_updated", updated)
+      .catch((err) => console.error("[cards] broadcast failed:", err));
     res.json(updated);
 
   } catch (err) {
@@ -393,7 +409,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
        FROM decks d
        WHERE c.id = $1
          AND c.deck_id = d.id
-         AND d.user_id = $2
+         AND ${canWriteDeckSql("d", "$2")}
          AND c.deleted_at IS NULL
        RETURNING c.id, c.deck_id, c.deleted_at`,
       [id, req.user.id]
@@ -417,7 +433,8 @@ router.delete("/:id", authMiddleware, async (req, res) => {
     // deleted_at mee in de payload: broadcast() gebruikt de DB-timestamp als
     // server_time, zodat WS- en REST-sync dezelfde klokbron delen.
     const { deck_id, deleted_at } = result.rows[0];
-    broadcast(req.user.id, "card_deleted", { id, deck_id, deleted_at });
+    broadcastDeck(deck_id, "card_deleted", { id, deck_id, deleted_at })
+      .catch((err) => console.error("[cards] broadcast failed:", err));
     res.json({ message: "Card deleted" });
 
   } catch (err) {

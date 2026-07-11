@@ -13,6 +13,8 @@ import reviewRoutes from "./routes/review.js";
 import syncRoutes from "./routes/sync.js";
 import statsRoutes from "./routes/stats.js";
 import contactRoutes from "./routes/contacts.js";
+import shareRoutes from "./routes/shares.js";
+import groupRoutes from "./routes/groups.js";
 import { requireClientVersion, minClientBuild } from "./middleware/clientVersion.js";
 
 const app = express();
@@ -75,12 +77,16 @@ app.use((req, _res, next) => {
 // routes — één router met één naamset (remote/core/stable/recent).
 const api = express.Router();
 api.use("/auth", authRoutes);
+// shareRoutes definieert o.a. GET /decks/public en moet daarom vóór het
+// decks-router gemount worden (anders matcht GET /decks/:id "public" als id).
+api.use(shareRoutes);
 api.use("/decks", deckRoutes);
 api.use("/cards", cardRoutes);
 api.use("/review", reviewRoutes);
 api.use("/sync", syncRoutes);
 api.use("/stats", statsRoutes);
 api.use("/contacts", contactRoutes);
+api.use("/groups", groupRoutes);
 
 // Open discovery-endpoint: nooit achter de client-versiegate, zodat een te oude
 // client hier kan zien dat hij moet updaten (min_client_build = vereiste

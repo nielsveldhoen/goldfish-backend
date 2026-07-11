@@ -19,6 +19,9 @@ sudo -u postgres psql -d goldfish -f 011_decks_inactive.sql
 sudo -u postgres psql -d goldfish -f 012_deck_stats_totals.sql
 sudo -u postgres psql -d goldfish -f 013_password_reset_and_token_revocation.sql
 sudo -u postgres psql -d goldfish -f 014_decks_core_only.sql
+sudo -u postgres psql -d goldfish -f 015_contacts.sql
+sudo -u postgres psql -d goldfish -f 016_deck_sharing.sql
+sudo -u postgres psql -d goldfish -f 017_groups.sql
 ```
 
 | Bestand | Wat | Herhaalbaar? |
@@ -37,6 +40,9 @@ sudo -u postgres psql -d goldfish -f 014_decks_core_only.sql
 | `012_deck_stats_totals.sql` | `total_cards`/`total_core_cards` (`INTEGER NULL`) op `deck_stats` — historische deckgrootte per `(deck, datum)`, zodat de client de "all decks"-stats uit `deck_stats` kan aggregeren i.p.v. `user_daily_snapshot`. Bestaande rijen blijven `null` (geen backfill) | ja, idempotent (`ADD COLUMN IF NOT EXISTS`) |
 | `013_password_reset_and_token_revocation.sql` | `password_reset_tokens`-tabel (sha256-gehasht, single-use, 1 u geldig) voor de wachtwoord-reset-flow + `users.tokens_valid_after` (JWT-revocatie-watermerk voor `POST /auth/logout-all` en de reset). **Vereist vóór deploy van de juli-2026-backend**: het auth-middleware leest de kolom op elke request. Reverse: `013_..._down.sql` | ja, idempotent (`IF NOT EXISTS` overal) |
 | `014_decks_core_only.sql` | `core_only`-kolom (`BOOLEAN NOT NULL DEFAULT false`) op `decks` ("alleen kernkaarten"-toestand; spiegelt `inactive` qua opslag/sync/WS maar zonder effect op aggregaten — client filtert zelf). Vanaf deze backend sluit `inactive = true` óók de core-kaarten van dat deck uit `/review/core*` (code, geen DDL). Reverse: `014_..._down.sql` | ja, idempotent (`ADD COLUMN IF NOT EXISTS`) |
+| `015_contacts.sql` | `contacts`-tabel (vrienden op e-mailadres, `pending`/`accepted`, uniek per paar ongeacht richting) + GRANT DML aan app-rol `goldfish`. Online-only (geen sync-delta). Reverse: `015_..._down.sql` | ja, idempotent |
+| `016_deck_sharing.sql` | `deck_shares`-tabel: één toegangswaarheid voor live gedeelde decks (`invited`/`subscribed`/`group`; `revoked_at` voedt `removed_deck_ids` in de sync; `inactive` = archiefvlag van de óntvanger) + partial unique indexes, sync-indexen, publieke-discovery-index op `decks`, `set_updated_at`-trigger, GRANT. **Vereist vóór deploy van de sharing-backend** (sync/decks-queries joinen op de tabel). Reverse: `016_..._down.sql` | ja, idempotent |
+| `017_groups.sql` | groepen: `groups` (join-code + argon2-join-wachtwoord, soft-delete), `group_members` (owner/member, invited/active, `can_add_decks`), `group_decks` (catalogus) + FK `deck_shares.group_id → groups`, triggers, GRANT. Vereist 016. Reverse: `017_..._down.sql` | ja, idempotent |
 
 **Minimale clientversie bijstellen** (geen migratie — gewoon DML):
 ```sql

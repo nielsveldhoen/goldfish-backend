@@ -142,20 +142,55 @@ function serverTimeFor(items) {
 // ook bij één item. Call sites mogen een los object of een array aanleveren;
 // een lege array wordt niet verstuurd.
 export function broadcast(userId, type, payload, exclude = null) {
+  broadcastMany([userId], type, payload, exclude);
+}
+
+// Fan-out naar owner + alle actieve recipients van een deck (deck_updated,
+// deck_deleted, card_*). `excludeUserId` voor bulk-paden die de owner al
+// apart (met de volledige batch) bedienen. Async — call sites die de
+// response niet willen ophouden mogen fire-and-forget met .catch().
+export async function broadcastDeck(deckId, type, payload, { excludeUserId = null } = {}) {
+  const { rows } = await pool.query(
+    `SELECT user_id AS id FROM decks WHERE id = $1
+     UNION
+     SELECT recipient_id AS id FROM deck_shares
+     WHERE deck_id = $1 AND revoked_at IS NULL`,
+    [deckId]
+  );
+  const userIds = rows.map((r) => r.id).filter((id) => id !== excludeUserId);
+  broadcastMany(userIds, type, payload);
+}
+
+// Fan-out naar alle leden van een groep (actief én uitgenodigd — een invitee
+// moet zijn aanvraag zien verdwijnen als de groep wijzigt/verdwijnt).
+export async function broadcastGroup(groupId, type, payload, { excludeUserId = null } = {}) {
+  const { rows } = await pool.query(
+    `SELECT user_id FROM group_members WHERE group_id = $1`,
+    [groupId]
+  );
+  const userIds = rows.map((r) => r.user_id).filter((id) => id !== excludeUserId);
+  broadcastMany(userIds, type, payload);
+}
+
+function broadcastMany(userIds, type, payload, exclude = null) {
   const items = Array.isArray(payload) ? payload : [payload];
   if (items.length === 0) return;
 
-  const sockets = connections.get(userId);
-  if (!sockets) return;
+  let message = null; // lazy: niet serialiseren als niemand verbonden is
 
-  const message = JSON.stringify({
-    type,
-    payload: items,
-    server_time: serverTimeFor(items),
-  });
+  for (const userId of userIds) {
+    const sockets = connections.get(userId);
+    if (!sockets) continue;
 
-  for (const socket of sockets) {
-    if (socket === exclude) continue;
-    if (socket.readyState === WebSocket.OPEN) socket.send(message);
+    message ??= JSON.stringify({
+      type,
+      payload: items,
+      server_time: serverTimeFor(items),
+    });
+
+    for (const socket of sockets) {
+      if (socket === exclude) continue;
+      if (socket.readyState === WebSocket.OPEN) socket.send(message);
+    }
   }
 }

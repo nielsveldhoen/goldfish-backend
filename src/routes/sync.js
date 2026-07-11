@@ -51,9 +51,19 @@ router.get("/changes", authMiddleware, async (req, res) => {
       [SYNC_WATERMARK_OVERLAP_SECONDS]
     );
 
-    const [decksResult, cardsResult, progressResult] = await Promise.all([
+    const [decksResult, cardsResult, progressResult, removedResult] = await Promise.all([
+      // Eigen decks + decks met een actieve share-rij. Voor gedeelde decks
+      // geldt een extra venster: is de shárerij nieuw/gewijzigd sinds `since`
+      // (nieuw gedeeld, her-gedeeld, archiefvlag), dan komt het deck mee ook
+      // al is d.updated_at oud. Tombstones (deleted_at gezet) lopen voor
+      // beide rollen via d.updated_at, dat de soft-delete-UPDATE bijwerkt.
       pool.query(
         `SELECT d.*,
+           CASE WHEN d.user_id = $1 THEN 'owner' ELSE 'recipient' END AS role,
+           _ou.username AS owner_username,
+           (d.user_id = $1) AS can_edit,
+           CASE WHEN d.user_id = $1 THEN d.inactive
+                ELSE COALESCE(sh.inactive, false) END AS effective_inactive,
            (SELECT COUNT(*) FROM cards c
               JOIN user_card_progress ucp
                 ON ucp.card_id = c.id
@@ -84,14 +94,32 @@ router.get("/changes", authMiddleware, async (req, res) => {
                AND (ucp.repetitions IS NULL OR ucp.repetitions = '')
            ) AS core_new_count
          FROM decks d
-         WHERE d.user_id = $1 AND d.updated_at > $2
+         JOIN users _ou ON _ou.id = d.user_id
+         LEFT JOIN LATERAL (
+           SELECT bool_and(s.inactive) AS inactive, MAX(s.updated_at) AS last_update
+           FROM deck_shares s
+           WHERE s.deck_id = d.id AND s.recipient_id = $1 AND s.revoked_at IS NULL
+         ) sh ON true
+         WHERE (d.user_id = $1 AND d.updated_at > $2)
+            OR (sh.inactive IS NOT NULL AND (d.updated_at > $2 OR sh.last_update > $2))
          ORDER BY d.updated_at ASC`,
         [req.user.id, sinceDate]
       ),
+      // Kaarten van decks waar ik toegang toe heb. Tweede tak: een share die
+      // ná `since` (opnieuw) actief werd levert ál zijn kaarten integraal —
+      // een vandaag gedeeld deck heeft kaarten met een oude updated_at die
+      // anders buiten de delta vallen. Dubbel geleverde rijen zijn
+      // onschadelijk: de client upsert idempotent.
       pool.query(
         `SELECT c.* FROM cards c
-         WHERE c.deck_id IN (SELECT id FROM decks WHERE user_id = $1)
-           AND c.updated_at > $2
+         WHERE (c.updated_at > $2 AND c.deck_id IN (
+                 SELECT id FROM decks WHERE user_id = $1
+                 UNION
+                 SELECT deck_id FROM deck_shares
+                 WHERE recipient_id = $1 AND revoked_at IS NULL))
+            OR c.deck_id IN (
+                 SELECT deck_id FROM deck_shares
+                 WHERE recipient_id = $1 AND revoked_at IS NULL AND updated_at > $2)
          ORDER BY c.updated_at ASC`,
         [req.user.id, sinceDate]
       ),
@@ -101,13 +129,30 @@ router.get("/changes", authMiddleware, async (req, res) => {
          ORDER BY updated_at ASC`,
         [req.user.id, sinceDate]
       ),
+      // Toegang verloren (revoke/ontvolgen/kick): geen tombstone — het deck
+      // bestaat nog. Alleen decks zonder énige resterende actieve share; de
+      // client ruimt deck + kaarten + eigen progress lokaal op.
+      pool.query(
+        `SELECT DISTINCT s.deck_id FROM deck_shares s
+         WHERE s.recipient_id = $1 AND s.revoked_at > $2
+           AND NOT EXISTS (
+             SELECT 1 FROM deck_shares s2
+             WHERE s2.deck_id = s.deck_id
+               AND s2.recipient_id = $1
+               AND s2.revoked_at IS NULL)`,
+        [req.user.id, sinceDate]
+      ),
     ]);
 
     res.json({
       server_time: serverTimeResult.rows[0].now,
-      decks: decksResult.rows,
+      decks: decksResult.rows.map(({ effective_inactive, ...deck }) => ({
+        ...deck,
+        inactive: effective_inactive,
+      })),
       cards: cardsResult.rows,
       progress: progressResult.rows,
+      removed_deck_ids: removedResult.rows.map((r) => r.deck_id),
     });
 
   } catch (err) {
