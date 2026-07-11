@@ -5,7 +5,7 @@ import { broadcast, broadcastDeck } from "../ws.js";
 import { LIMITS, invalidString, invalidBoolean, invalidTags, firstError } from "../utils/validate.js";
 import {
   canReadDeckSql,
-  canWriteDeckSql,
+  isDeckOwnerSql,
   deckShareColumnsSql,
   ownerJoinSql,
   shapeDeckRow,
@@ -155,7 +155,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
     const current = await client.query(
       `SELECT d.*, _ou.username AS owner_username FROM decks d
        ${ownerJoinSql("d")}
-       WHERE d.id = $1 AND ${canWriteDeckSql("d", "$2")} AND d.deleted_at IS NULL
+       WHERE d.id = $1 AND ${isDeckOwnerSql("d", "$2")} AND d.deleted_at IS NULL
        FOR UPDATE OF d`,
       [id, req.user.id]
     );
@@ -183,7 +183,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
            tags = $4,
            inactive = $5,
            core_only = $6
-       WHERE d.id = $7 AND ${canWriteDeckSql("d", "$8")}
+       WHERE d.id = $7 AND ${isDeckOwnerSql("d", "$8")}
        RETURNING *`,
       [
         title ?? deck.title,

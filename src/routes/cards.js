@@ -3,7 +3,7 @@ import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { broadcast, broadcastDeck } from "../ws.js";
 import { LIMITS, invalidString, firstError } from "../utils/validate.js";
-import { canReadDeckSql, canWriteDeckSql } from "../utils/deckAccess.js";
+import { canReadDeckSql, canEditDeckSql } from "../utils/deckAccess.js";
 
 const router = express.Router();
 
@@ -127,7 +127,7 @@ router.post("/", authMiddleware, async (req, res) => {
   try {
     const deckCheck = await pool.query(
       `SELECT d.id FROM decks d
-       WHERE d.id = $1 AND ${canWriteDeckSql("d", "$2")} AND d.deleted_at IS NULL`,
+       WHERE d.id = $1 AND ${canEditDeckSql("d", "$2")} AND d.deleted_at IS NULL`,
       [deck_id, req.user.id]
     );
 
@@ -188,7 +188,7 @@ router.post("/bulk", authMiddleware, async (req, res) => {
 
     const deckCheck = await client.query(
       `SELECT d.id FROM decks d
-       WHERE d.id = $1 AND ${canWriteDeckSql("d", "$2")} AND d.deleted_at IS NULL`,
+       WHERE d.id = $1 AND ${canEditDeckSql("d", "$2")} AND d.deleted_at IS NULL`,
       [deck_id, req.user.id]
     );
 
@@ -269,7 +269,7 @@ router.post("/bulk-delete", authMiddleware, async (req, res) => {
        FROM decks d
        WHERE c.id = ANY($1::uuid[])
          AND c.deck_id = d.id
-         AND ${canWriteDeckSql("d", "$2")}
+         AND ${canEditDeckSql("d", "$2")}
          AND c.deleted_at IS NULL
        RETURNING c.id, c.deck_id, c.deleted_at`,
       [ids, req.user.id]
@@ -288,8 +288,9 @@ router.post("/bulk-delete", authMiddleware, async (req, res) => {
 
     await client.query("COMMIT");
 
-    // Owner (alle devices) krijgt de hele batch; recipients per deck apart —
-    // de batch kan meerdere decks met verschillende ontvangers beslaan.
+    // De schrijver (alle devices) krijgt de hele batch; de overige
+    // betrokkenen per deck apart — de batch kan meerdere decks met
+    // verschillende ontvangers beslaan.
     broadcast(req.user.id, "card_deleted", result.rows);
     const byDeck = new Map();
     for (const row of result.rows) {
@@ -338,7 +339,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
     const current = await client.query(
       `SELECT c.* FROM cards c
        JOIN decks d ON c.deck_id = d.id
-       WHERE c.id = $1 AND ${canWriteDeckSql("d", "$2")}
+       WHERE c.id = $1 AND ${canEditDeckSql("d", "$2")}
          AND c.deleted_at IS NULL AND d.deleted_at IS NULL
        FOR UPDATE OF c`,
       [id, req.user.id]
@@ -363,7 +364,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
        FROM decks d
        WHERE c.id = $3
          AND c.deck_id = d.id
-         AND ${canWriteDeckSql("d", "$4")}
+         AND ${canEditDeckSql("d", "$4")}
        RETURNING c.*`,
       [
         question ?? card.question,
@@ -409,7 +410,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
        FROM decks d
        WHERE c.id = $1
          AND c.deck_id = d.id
-         AND ${canWriteDeckSql("d", "$2")}
+         AND ${canEditDeckSql("d", "$2")}
          AND c.deleted_at IS NULL
        RETURNING c.id, c.deck_id, c.deleted_at`,
       [id, req.user.id]

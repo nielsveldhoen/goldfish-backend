@@ -250,7 +250,7 @@ Alle decks waar de ingelogde gebruiker toegang toe heeft (eigen + gedeeld), geso
 ]
 ```
 
-> **`role` / `owner_username` / `can_edit`** (sinds de sharing-release): `can_edit` is de capability-vlag waar de client zijn bewerk-UI en write-queue-guards op stuurt — nu altijd gelijk aan "ben ik de eigenaar", maar een latere release kan hem voor groepsleden aanzetten zonder client-wijziging. `role`/`owner_username` zijn weergave (badge "gedeeld door X").
+> **`role` / `owner_username` / `can_edit`** (sinds de sharing-release; `can_edit` écht sinds de edit-rechten-release/migratie 019): `can_edit` is de capability-vlag waar de client zijn **kaart**-bewerk-UI en write-queue-guards op stuurt. Voor de eigenaar altijd `true`; voor een recipient `true` zodra de eigenaar hem edit-recht gaf (`PUT /decks/:id/permissions/:user_id`) — dat betekent **volledig kaartbeheer** (kaarten aanmaken/bewerken/verwijderen), maar **géén** deck-writes: `PUT/DELETE /decks/:id` blijven owner-only. Eigenaarschap-beslissingen (deck verwijderen vs. van dashboard halen, archiefvlag via deck-PUT vs. share-state, delen, catalogus) moet de client dus op `role` keyen, **niet** op `can_edit`. `owner_username` is weergave (badge "gedeeld door X").
 >
 > **`inactive` voor recipients:** bij een gedeeld deck bevat `inactive` de archiefvlag van de **ontvanger zelf** (gezet via `PUT /decks/:id/share-state`), niet die van de eigenaar — archiveren van een gedeeld deck raakt de eigenaar dus niet, en andersom.
 
@@ -383,7 +383,7 @@ Meerdere decks tegelijk soft-deleten (max **100** ids per request), in één tra
 
 ## Kaarten (`/cards`) 🔒
 
-Alle card-endpoints vereisen authenticatie. Toegang is beperkt tot kaarten in decks van de ingelogde gebruiker.
+Alle card-endpoints vereisen authenticatie. Lezen kan in elk deck waar de gebruiker toegang toe heeft (eigen + gedeeld). **Schrijven** (aanmaken, bewerken, verwijderen, bulk) kan in eigen decks én in gedeelde decks waar de eigenaar de gebruiker **edit-recht** gaf (`can_edit`, zie `PUT /decks/:id/permissions/:user_id`); zonder dat recht geven card-writes `403`/`404` zoals voorheen.
 
 ### GET `/cards`
 Alle kaarten van de gebruiker. Optioneel filteren op deck. Soft-deleted kaarten en kaarten in soft-deleted decks worden niet teruggegeven.
@@ -436,7 +436,7 @@ Nieuwe kaart aanmaken.
 
 **Foutcodes:**
 - `400` — ontbrekende velden of vraag/antwoord boven de maximale lengte
-- `403` — deck is niet van deze gebruiker (ook bij een malformed deck_id)
+- `403` — geen schrijfrecht op dit deck: geen eigenaar en geen `can_edit` (ook bij een malformed deck_id)
 
 ---
 
@@ -462,7 +462,7 @@ Per kaart is `created_at` optioneel, met exact dezelfde semantiek als bij `POST 
 
 **Foutcodes:**
 - `400` — ontbrekende velden, lege cards-array, meer dan 500 kaarten, of een vraag/antwoord boven de maximale lengte (max 10000 tekens; de hele batch wordt dan geweigerd)
-- `403` — deck is niet van deze gebruiker (ook bij een malformed deck_id)
+- `403` — geen schrijfrecht op dit deck: geen eigenaar en geen `can_edit` (ook bij een malformed deck_id)
 
 ---
 
@@ -510,7 +510,7 @@ Soft-delete: zet `deleted_at` op de huidige tijd. De kaart verschijnt niet meer 
 ### POST `/cards/bulk-delete`
 Meerdere kaarten tegelijk soft-deleten (max **500** ids per request), in één transactie. Per kaart exact dezelfde semantiek als `DELETE /cards/:id`, inclusief de cascade: het voortgangsrecord van elke verwijderde kaart wordt mee-gesoftdelete, zodat het via `/sync/changes` en de core-stats correct verdwijnt.
 
-**Idempotent en tolerant:** ids die niet bestaan, al soft-deleted zijn of van een andere gebruiker zijn worden **stilzwijgend genegeerd** (zelfde stijl als het `ids`-filter van `GET /stats/decks`). Er komt géén `404` voor individuele ids — bij een `200` mag de client de hele batch als geslaagd behandelen. Een tweede call met dezelfde ids geeft gewoon `200` met `"deleted": 0`.
+**Idempotent en tolerant:** ids die niet bestaan, al soft-deleted zijn of in een deck zitten waar de gebruiker geen schrijfrecht op heeft worden **stilzwijgend genegeerd** (zelfde stijl als het `ids`-filter van `GET /stats/decks`). Er komt géén `404` voor individuele ids — bij een `200` mag de client de hele batch als geslaagd behandelen. Een tweede call met dezelfde ids geeft gewoon `200` met `"deleted": 0`.
 
 **Request body:**
 ```json
@@ -916,7 +916,7 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
 }
 ```
 
-> **Gedeelde decks in de delta:** accepteer je een deck-uitnodiging, volg je een publiek deck of voeg je een groepsdeck toe, dan komt het deck **én al zijn kaarten integraal** mee in de eerstvolgende delta — ook al zijn hun `updated_at`'s ouder dan `since` (het nieuw-gedeeld-venster kijkt naar de share-rij). Een nog niet geaccepteerde uitnodiging reist **niet** mee. Voor recipients bevat `inactive` de eigen archiefvlag (share-state), niet die van de eigenaar.
+> **Gedeelde decks in de delta:** accepteer je een deck-uitnodiging, volg je een publiek deck of voeg je een groepsdeck toe, dan komt het deck **én al zijn kaarten integraal** mee in de eerstvolgende delta — ook al zijn hun `updated_at`'s ouder dan `since` (het nieuw-gedeeld-venster kijkt naar de share-rij). Een nog niet geaccepteerde uitnodiging reist **niet** mee. Voor recipients bevat `inactive` de eigen archiefvlag (share-state), niet die van de eigenaar, en `can_edit` het effectieve edit-recht — een toggle door de eigenaar (`PUT /decks/:id/permissions/:user_id`) bumpt de share-rij en brengt het deck dus vanzelf met de nieuwe `can_edit` in de delta.
 >
 > **`removed_deck_ids`:** decks waarvoor de toegang sinds `since` is **ingetrokken** (revoke door de eigenaar, zelf ontvolgd, kick uit een groep, groep opgeheven). Er is dan geen tombstone — het deck bestaat nog bij de eigenaar. De client verwijdert deck + kaarten + eigen progress lokaal. Alleen decks zonder énige resterende toegangsbron staan erin. Bij `full_resync` is dit veld irrelevant (de client herbouwt toch alles). Oudere clients mogen het veld negeren.
 
@@ -1281,7 +1281,7 @@ Decks worden **live** gedeeld — geen kopieën. Een recipient ziet hetzelfde de
 - **`subscribed`** — zelf gevolgd (publiek deck; eigen actie → direct geaccepteerd);
 - **`group`** — zelf toegevoegd uit een groepscatalogus (eigen actie → direct geaccepteerd; zie [Groepen](#groepen-groups-🔒)).
 
-Een recipient mag: alles lezen, eigen progress schrijven/resetten, eigen stats loggen, zijn eigen archiefvlag zetten en zelf afhaken. Writes op deck/kaarten geven `404` (zelfde als "bestaat niet").
+Een recipient mag: alles lezen, eigen progress schrijven/resetten, eigen stats loggen, zijn eigen archiefvlag zetten en zelf afhaken. Writes op deck/kaarten geven `404` (zelfde als "bestaat niet") — **tenzij** de eigenaar hem **edit-recht** gaf (`can_edit`, per persoon per deck via `PUT /decks/:id/permissions/:user_id`): dan heeft hij volledig **kaartbeheer** (kaarten aanmaken/bewerken/verwijderen, incl. bulk; last-write-wins/`409 stale_write` zoals tussen eigen devices). Deck-writes (`PUT/DELETE /decks/:id`, bulk-delete, delen, catalogus) blijven altijd owner-only. Het recht zit op de share-rij en vervalt dus automatisch mee bij intrekken/afhaken/kick; bij her-delen/her-volgen/her-toevoegen ná een revoke begint de rij weer op `can_edit: false`.
 
 ### POST `/decks/:id/share`
 Deel een eigen deck met een geaccepteerd contact. Maakt een **uitnodiging** aan (`accepted_at = null`): het deck verschijnt bij de ontvanger in de accepteer/afwijs-lijst (`GET /shares/received`), niet meteen op het dashboard.
@@ -1291,7 +1291,7 @@ Deel een eigen deck met een geaccepteerd contact. Maakt een **uitnodiging** aan 
 - Alleen de eigenaar; onbekend/andermans deck → `404`.
 - `recipient_id` geen wederzijds geaccepteerd contact → `403` `{ "error": "not_a_contact" }`.
 - Jezelf → `400` `{ "error": "cannot_share_with_self" }`.
-- Her-delen na intrekken/afwijzen = upsert → nieuwe uitnodiging. Her-delen van een nog openstaande of al geaccepteerde share verandert de status niet (dubbel delen degradeert niets).
+- Her-delen na intrekken/afwijzen = upsert → nieuwe uitnodiging, met **gereset edit-recht** (`can_edit: false`). Her-delen van een nog openstaande of al geaccepteerde share verandert de status én het edit-recht niet (dubbel delen degradeert niets).
 
 **Response `201`:** de share-rij. **Realtime:** `share_received` naar de ontvanger — alleen zolang het een openstaande uitnodiging is.
 
@@ -1307,7 +1307,51 @@ Mijn openstaande deck-uitnodigingen (de accepteer/afwijs-lijst): `[ { deck_id, d
 Eigenaar trekt een directe share (invited/subscribed) of openstaande uitnodiging in. Idempotent → `204`. De progress van de recipient op dit deck wordt soft-deleted (tenzij een groepsshare de toegang nog draagt). **Realtime:** `deck_removed` naar de recipient.
 
 ### GET `/shares/sent`
-Actieve directe shares op mijn decks (om in te trekken): `[ { deck_id, deck_title, recipient_id, recipient_username, kind, created_at, pending } ]` — `pending: true` zolang de ontvanger de uitnodiging nog niet accepteerde. Geen e-mailadressen. Groepsshares lopen via de groep.
+Actieve directe shares op mijn decks (om in te trekken): `[ { deck_id, deck_title, recipient_id, recipient_username, kind, created_at, pending, can_edit } ]` — `pending: true` zolang de ontvanger de uitnodiging nog niet accepteerde. Geen e-mailadressen. Groepsshares lopen via de groep (zie `GET /shares/overview` voor het volledige beeld).
+
+### GET `/shares/overview`
+Met wie (personen én groepen) deel ik welke decks — het "Gedeeld met"-overzicht voor de eigenaar. Online-only (geen sync/Hive), usernames, nooit e-mailadressen.
+
+**Response `200`:**
+```json
+[
+  {
+    "deck_id": "uuid",
+    "deck_title": "Frans",
+    "is_public": true,
+    "people": [
+      { "user_id": "uuid", "username": "anna",
+        "direct": true,               // heeft een directe (contact)share
+        "via_groups": ["Studieclub"], // groepsshares waarlangs ze het deck heeft
+        "pending": false,             // true = nog géén enkele rij geaccepteerd
+        "can_edit": true }            // effectief edit-recht (OR over de rijen)
+    ],
+    "groups": [
+      { "group_id": "uuid", "name": "Studieclub",
+        "members_with_deck": 3,       // leden die het catalogus-deck toevoegden
+        "member_count": 7 }           // actieve leden totaal
+    ],
+    "follower_count": 12              // publieke volgers (alleen een aantal)
+  }
+]
+```
+
+- `people` is gededupliceerd per persoon over al zijn actieve rijen (direct + groepen); publieke volgers staan er **niet** in (alleen in `follower_count`).
+- Decks zonder enige share/catalogus-vermelding/volger ontbreken.
+
+### PUT `/decks/:id/permissions/:user_id`
+Eigenaar geeft een persoon **edit-recht** op dit deck of trekt het in. Edit-recht = volledig **kaartbeheer** (kaarten aanmaken/bewerken/verwijderen, incl. bulk); deck-writes blijven owner-only.
+
+**Request body:** `{ "can_edit": true }`
+
+- Zet `can_edit` op **ál** iemands niet-gerevokete rijen op dit deck tegelijk (direct + groep), zodat het effectieve recht eenduidig is.
+- Werkt ook op een nog openstaande uitnodiging (response: `"pending": true`) — het recht gaat dan in zodra de ontvanger accepteert.
+- Publieke volgers (`kind: "subscribed"`) zijn uitgesloten → `404` (edit-recht loopt via een contact-share of groep).
+- Alleen de eigenaar; onbekend/andermans deck of geen share-rij → `404`; `can_edit` geen boolean → `400`.
+
+**Response `200`:** `{ "deck_id", "user_id", "can_edit", "pending" }`
+
+**Realtime:** `deck_access_changed` (`[ { "deck_id", "can_edit" } ]`) naar de recipient (alleen als die het deck al heeft, dus minstens één geaccepteerde rij) en `shares_updated` (`[ { "deck_id" } ]`) naar de eigen andere devices. De recipient krijgt het deck bovendien met de bijgewerkte `can_edit` in zijn eerstvolgende sync-delta (de share-`updated_at` is gebumpt).
 
 ### GET `/decks/public`
 Publieke bibliotheek (discovery), gepagineerd. Eigen decks worden uitgesloten.
@@ -1449,6 +1493,8 @@ Bulk-endpoints sturen dus **één** event met alle items in de array (geen event
 | `share_resolved`  | POST `/decks/:id/share/accept` (eigen andere devices) | `{ "deck_id" }` — uitnodiging is geaccepteerd: uit de pending-lijst halen en bijsyncen |
 | `deck_removed`    | toegang verloren: share/uitnodiging ingetrokken, afgewezen, ontvolgd, kick, deck uit catalogus, groep opgeheven | `{ "id": "<deck-id>" }` — client verwijdert deck + kaarten + eigen progress lokaal (en haalt een eventuele uitnodiging uit de pending-lijst) |
 | `shared_deck_state` | PUT `/decks/:id/share-state` (eigen andere devices) | `{ "id": "<deck-id>", "inactive": bool }` |
+| `deck_access_changed` | PUT `/decks/:id/permissions/:user_id` (naar de recipient, alle devices) | `{ "deck_id", "can_edit": bool }` — client werkt de `can_edit` van het lokale deck bij |
+| `shares_updated`  | PUT `/decks/:id/permissions/:user_id` (eigen andere devices van de owner) | `{ "deck_id" }` — hint om een open "Gedeeld met"-overzicht te verversen |
 | `group_updated`   | elke groepsmutatie (join, invite, leden, bevoegdheden, catalogus, naam) — naar alle leden | volledig group-object (client upsert zijn Hive-box) |
 | `group_invite_received` | POST `/groups/:id/invites` (naar het doelwit) | volledig group-object (eigen member-rij heeft `status: "invited"`) |
 | `group_removed`   | je bent geen lid meer (kick, zelf verlaten, invite afgewezen, groep opgeheven) | `{ "id": "<group-id>" }` |

@@ -4,7 +4,7 @@ import { authMiddleware } from "../middleware/auth.js";
 import { broadcast } from "../ws.js";
 import { SYNC_RESYNC_HORIZON_DAYS, SYNC_WATERMARK_OVERLAP_SECONDS } from "../config/retention.js";
 import { LIMITS, invalidString, invalidBoolean, invalidScore, invalidDate, firstError } from "../utils/validate.js";
-import { canReadDeckSql, effectiveInactiveSql, ownerJoinSql } from "../utils/deckAccess.js";
+import { canReadDeckSql, canEditDeckSql, effectiveInactiveSql, ownerJoinSql } from "../utils/deckAccess.js";
 
 const router = express.Router();
 
@@ -424,7 +424,7 @@ router.get("/decks/summary", authMiddleware, async (req, res) => {
         d.created_at,
         CASE WHEN d.user_id = $1 THEN 'owner' ELSE 'recipient' END AS role,
         _ou.username AS owner_username,
-        (d.user_id = $1) AS can_edit,
+        ${canEditDeckSql("d", "$1")} AS can_edit,
 
         COUNT(ucp.card_id) FILTER (
           WHERE ucp.due_date <= CURRENT_DATE

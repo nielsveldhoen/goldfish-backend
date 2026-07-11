@@ -61,7 +61,8 @@ router.get("/changes", authMiddleware, async (req, res) => {
         `SELECT d.*,
            CASE WHEN d.user_id = $1 THEN 'owner' ELSE 'recipient' END AS role,
            _ou.username AS owner_username,
-           (d.user_id = $1) AS can_edit,
+           CASE WHEN d.user_id = $1 THEN true
+                ELSE COALESCE(sh.can_edit, false) END AS can_edit,
            CASE WHEN d.user_id = $1 THEN d.inactive
                 ELSE COALESCE(sh.inactive, false) END AS effective_inactive,
            (SELECT COUNT(*) FROM cards c
@@ -96,7 +97,8 @@ router.get("/changes", authMiddleware, async (req, res) => {
          FROM decks d
          JOIN users _ou ON _ou.id = d.user_id
          LEFT JOIN LATERAL (
-           SELECT bool_and(s.inactive) AS inactive, MAX(s.updated_at) AS last_update
+           SELECT bool_and(s.inactive) AS inactive, bool_or(s.can_edit) AS can_edit,
+                  MAX(s.updated_at) AS last_update
            FROM deck_shares s
            WHERE s.deck_id = d.id AND s.recipient_id = $1
              AND s.revoked_at IS NULL AND s.accepted_at IS NOT NULL

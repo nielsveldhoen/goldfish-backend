@@ -22,6 +22,8 @@ sudo -u postgres psql -d goldfish -f 014_decks_core_only.sql
 sudo -u postgres psql -d goldfish -f 015_contacts.sql
 sudo -u postgres psql -d goldfish -f 016_deck_sharing.sql
 sudo -u postgres psql -d goldfish -f 017_groups.sql
+sudo -u postgres psql -d goldfish -f 018_share_accept.sql
+sudo -u postgres psql -d goldfish -f 019_deck_share_edit.sql
 ```
 
 | Bestand | Wat | Herhaalbaar? |
@@ -43,6 +45,8 @@ sudo -u postgres psql -d goldfish -f 017_groups.sql
 | `015_contacts.sql` | `contacts`-tabel (vrienden op e-mailadres, `pending`/`accepted`, uniek per paar ongeacht richting) + GRANT DML aan app-rol `goldfish`. Online-only (geen sync-delta). Reverse: `015_..._down.sql` | ja, idempotent |
 | `016_deck_sharing.sql` | `deck_shares`-tabel: één toegangswaarheid voor live gedeelde decks (`invited`/`subscribed`/`group`; `revoked_at` voedt `removed_deck_ids` in de sync; `inactive` = archiefvlag van de óntvanger) + partial unique indexes, sync-indexen, publieke-discovery-index op `decks`, `set_updated_at`-trigger, GRANT. **Vereist vóór deploy van de sharing-backend** (sync/decks-queries joinen op de tabel). Reverse: `016_..._down.sql` | ja, idempotent |
 | `017_groups.sql` | groepen: `groups` (join-code + argon2-join-wachtwoord, soft-delete), `group_members` (owner/member, invited/active, `can_add_decks`), `group_decks` (catalogus) + FK `deck_shares.group_id → groups`, triggers, GRANT. Vereist 016. Reverse: `017_..._down.sql` | ja, idempotent |
+| `018_share_accept.sql` | `accepted_at`-kolom op `deck_shares`: een directe share is voortaan een uitnodiging (`NULL` = pending, géén toegang); bestaande rijen worden gebackfilled naar geaccepteerd. Vereist 016. Reverse: `018_..._down.sql` | ja, idempotent |
+| `019_deck_share_edit.sql` | `can_edit`-kolom (`BOOLEAN NOT NULL DEFAULT false`) op `deck_shares`: edit-recht (volledig kaartbeheer) dat de deck-owner per persoon uitdeelt (EDIT_RIGHTS_PLAN.md). Vereist 016/018. Reverse: `019_..._down.sql` | ja, idempotent |
 
 **Minimale clientversie bijstellen** (geen migratie — gewoon DML):
 ```sql

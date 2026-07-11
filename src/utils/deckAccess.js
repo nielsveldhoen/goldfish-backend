@@ -1,12 +1,13 @@
-// Toegangslaag voor deck-sharing (SHARING_PLAN.md). Eén plek voor de
-// SQL-fragmenten en de response-shaping, zodat alle routes uniform blijven.
+// Toegangslaag voor deck-sharing (SHARING_PLAN.md + EDIT_RIGHTS_PLAN.md).
+// Eén plek voor de SQL-fragmenten en de response-shaping, zodat alle routes
+// uniform blijven.
 //
 // Model: één niet-gerevokete, geaccepteerde rij in deck_shares = leestoegang
 // voor de recipient tot het deck (+ eigen progress erop). accepted_at IS NULL
 // = uitnodiging in afwachting (alleen kind='invited'): nog géén toegang, de
-// ontvanger accepteert of wijst af. Schrijven aan deck/kaarten
-// blijft owner-only — maar via canWriteDeckSql, zodat Release C
-// (schrijfrechten voor groepsleden) alleen dát fragment hoeft te verruimen.
+// ontvanger accepteert of wijst af. Draagt zo'n rij can_edit, dan heeft de
+// recipient bovendien volledig kaartbeheer (canEditDeckSql). Deck-writes,
+// delen en catalogusbeheer blijven owner-only (isDeckOwnerSql).
 
 // Leestoegang tot deck `alias` voor user-parameter `userParam` (bijv. '$1').
 // LET OP: userParam komt meermaals in het fragment terug; de aanroeper moet
@@ -20,9 +21,23 @@ export function canReadDeckSql(alias, userParam) {
       AND _s.accepted_at IS NOT NULL))`;
 }
 
-// Schrijftoegang: v1 = alleen de eigenaar. Release C verruimt dit fragment
-// naar "owner óf actief groepslid met can_edit_decks".
-export function canWriteDeckSql(alias, userParam) {
+// Kaartbeheer (create/update/delete van kaarten): de eigenaar óf een
+// recipient met een actieve, geaccepteerde share-rij met can_edit. Het recht
+// zit op de rij en sterft dus automatisch mee met een revoke/kick/unfollow.
+export function canEditDeckSql(alias, userParam) {
+  return `(${alias}.user_id = ${userParam} OR EXISTS (
+    SELECT 1 FROM deck_shares _s
+    WHERE _s.deck_id = ${alias}.id
+      AND _s.recipient_id = ${userParam}
+      AND _s.revoked_at IS NULL
+      AND _s.accepted_at IS NOT NULL
+      AND _s.can_edit))`;
+}
+
+// Owner-only: deck-writes (PUT/DELETE /decks, bulk-delete), share-beheer en
+// groepscatalogus. Bewust een apart fragment naast canEditDeckSql, zodat elke
+// callsite expliciet zegt welk niveau hij bedoelt.
+export function isDeckOwnerSql(alias, userParam) {
   return `${alias}.user_id = ${userParam}`;
 }
 
@@ -40,13 +55,14 @@ export function effectiveInactiveSql(alias, userParam) {
 }
 
 // Extra SELECT-kolommen voor deck-reads: role, owner_username, can_edit en de
-// effectieve inactive. Vereist `JOIN users _ou ON _ou.id = <alias>.user_id`
-// in de query (via ownerJoinSql hieronder).
+// effectieve inactive. can_edit is het échte recht (owner of share-rij met
+// can_edit), niet langer een owner-synoniem. Vereist `JOIN users _ou ON
+// _ou.id = <alias>.user_id` in de query (via ownerJoinSql hieronder).
 export function deckShareColumnsSql(alias, userParam) {
   return `
     CASE WHEN ${alias}.user_id = ${userParam} THEN 'owner' ELSE 'recipient' END AS role,
     _ou.username AS owner_username,
-    (${alias}.user_id = ${userParam}) AS can_edit,
+    ${canEditDeckSql(alias, userParam)} AS can_edit,
     ${effectiveInactiveSql(alias, userParam)} AS effective_inactive`;
 }
 

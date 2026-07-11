@@ -840,11 +840,16 @@ router.post("/:id/decks/:deck_id/add", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "own_deck" });
     }
 
+    // Her-toevoegen na revoke/afhaken reset het edit-recht — een verse
+    // activatie begint altijd read-only, de deck-owner deelt rechten opnieuw
+    // uit (zelfde regel als her-delen en her-volgen in shares.js).
     const share = await client.query(
       `INSERT INTO deck_shares (deck_id, owner_id, recipient_id, kind, group_id)
        VALUES ($1, $2, $3, 'group', $4)
        ON CONFLICT (deck_id, recipient_id, group_id) WHERE group_id IS NOT NULL
-       DO UPDATE SET revoked_at = NULL, inactive = false, updated_at = NOW()
+       DO UPDATE SET revoked_at = NULL, inactive = false, updated_at = NOW(),
+         can_edit = CASE WHEN deck_shares.revoked_at IS NULL
+                         THEN deck_shares.can_edit ELSE false END
        RETURNING *`,
       [deck_id, deckCheck.rows[0].user_id, req.user.id, id]
     );

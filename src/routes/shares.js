@@ -8,7 +8,7 @@ import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { broadcast, broadcastDeck } from "../ws.js";
 import { LIMITS } from "../utils/validate.js";
-import { canWriteDeckSql, revokeShares } from "../utils/deckAccess.js";
+import { isDeckOwnerSql, revokeShares } from "../utils/deckAccess.js";
 
 const router = express.Router();
 
@@ -58,7 +58,7 @@ router.post("/decks/:id/share", authMiddleware, async (req, res) => {
     // Alleen de eigenaar deelt; onbekend/andermans deck → 404 (zoals PUT).
     const deckCheck = await client.query(
       `SELECT d.id, d.title FROM decks d
-       WHERE d.id = $1 AND ${canWriteDeckSql("d", "$2")} AND d.deleted_at IS NULL`,
+       WHERE d.id = $1 AND ${isDeckOwnerSql("d", "$2")} AND d.deleted_at IS NULL`,
       [id, req.user.id]
     );
     if (deckCheck.rowCount === 0) {
@@ -84,7 +84,9 @@ router.post("/decks/:id/share", authMiddleware, async (req, res) => {
     // (accepted_at = NULL): nog géén toegang, de ontvanger accepteert eerst.
     // Was de rij al actief (pending óf geaccepteerd), dan blijft die status
     // staan — dubbel delen degradeert een geaccepteerde share niet. Her-delen
-    // na revoke wordt weer een verse uitnodiging.
+    // na revoke wordt weer een verse uitnodiging, mét gereset edit-recht
+    // (intrekken = vertrouwen intrekken); op een actieve rij blijft het
+    // recht staan.
     const share = await client.query(
       `INSERT INTO deck_shares (deck_id, owner_id, recipient_id, kind, accepted_at)
        VALUES ($1, $2, $3, 'invited', NULL)
@@ -92,6 +94,8 @@ router.post("/decks/:id/share", authMiddleware, async (req, res) => {
        DO UPDATE SET
          accepted_at = CASE WHEN deck_shares.revoked_at IS NULL
                             THEN deck_shares.accepted_at ELSE NULL END,
+         can_edit = CASE WHEN deck_shares.revoked_at IS NULL
+                         THEN deck_shares.can_edit ELSE false END,
          revoked_at = NULL, inactive = false, kind = 'invited', updated_at = NOW()
        RETURNING *`,
       [id, req.user.id, recipient_id]
@@ -203,7 +207,7 @@ router.delete("/decks/:id/share/:recipient_id", authMiddleware, async (req, res)
     // deck-rij is de waarheid). Deck mag soft-deleted zijn: intrekken van een
     // share op een verwijderd deck is gewoon opruimen.
     const deckCheck = await client.query(
-      `SELECT d.id FROM decks d WHERE d.id = $1 AND ${canWriteDeckSql("d", "$2")}`,
+      `SELECT d.id FROM decks d WHERE d.id = $1 AND ${isDeckOwnerSql("d", "$2")}`,
       [id, req.user.id]
     );
     if (deckCheck.rowCount === 0) {
@@ -244,7 +248,7 @@ router.get("/shares/sent", authMiddleware, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT s.deck_id, d.title AS deck_title, s.recipient_id,
               u.username AS recipient_username, s.kind, s.created_at,
-              (s.accepted_at IS NULL) AS pending
+              (s.accepted_at IS NULL) AS pending, s.can_edit
        FROM deck_shares s
        JOIN decks d ON d.id = s.deck_id
        JOIN users u ON u.id = s.recipient_id
@@ -260,6 +264,207 @@ router.get("/shares/sent", authMiddleware, async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ========================
+// GET /shares/overview — met wie (personen/groepen) deel ik welke decks
+// ========================
+// Owner-perspectief voor het "Gedeeld met"-paneel: per gedeeld deck de
+// personen (gededupliceerd over hun rijen, effectief can_edit = bool_or,
+// met bron "via groep X"), de groepen uit de catalogus en het aantal
+// publieke volgers. Usernames, nooit e-mailadressen. Online-only.
+router.get("/shares/overview", authMiddleware, async (req, res) => {
+  try {
+    const [peopleRes, groupsRes, followersRes] = await Promise.all([
+      // Alle actieve niet-volger-rijen op mijn decks (invited + group),
+      // inclusief pending uitnodigingen — de owner ziet wat er uitstaat.
+      pool.query(
+        `SELECT s.deck_id, d.title AS deck_title, d.is_public,
+                s.recipient_id, u.username, s.kind, s.can_edit,
+                (s.accepted_at IS NULL) AS pending, g.name AS group_name
+         FROM deck_shares s
+         JOIN decks d ON d.id = s.deck_id
+         JOIN users u ON u.id = s.recipient_id
+         LEFT JOIN groups g ON g.id = s.group_id
+         WHERE d.user_id = $1
+           AND s.revoked_at IS NULL
+           AND s.kind <> 'subscribed'
+           AND d.deleted_at IS NULL
+         ORDER BY d.title ASC, u.username ASC`,
+        [req.user.id]
+      ),
+      // Catalogus-vermeldingen van mijn decks: in welke groepen staan ze en
+      // hoeveel leden hebben het deck daadwerkelijk toegevoegd.
+      pool.query(
+        `SELECT gd.deck_id, d.title AS deck_title, d.is_public,
+                g.id AS group_id, g.name,
+                (SELECT COUNT(*)::int FROM deck_shares s
+                 WHERE s.deck_id = gd.deck_id AND s.group_id = g.id
+                   AND s.revoked_at IS NULL AND s.accepted_at IS NOT NULL)
+                  AS members_with_deck,
+                (SELECT COUNT(*)::int FROM group_members gm
+                 WHERE gm.group_id = g.id AND gm.status = 'active')
+                  AS member_count
+         FROM group_decks gd
+         JOIN groups g ON g.id = gd.group_id AND g.deleted_at IS NULL
+         JOIN decks d ON d.id = gd.deck_id
+         WHERE d.user_id = $1 AND d.deleted_at IS NULL
+         ORDER BY d.title ASC, g.name ASC`,
+        [req.user.id]
+      ),
+      // Publieke volgers: alleen een aantal (vreemden krijgen geen naam of
+      // rechten in dit overzicht).
+      pool.query(
+        `SELECT s.deck_id, d.title AS deck_title, d.is_public,
+                COUNT(*)::int AS follower_count
+         FROM deck_shares s
+         JOIN decks d ON d.id = s.deck_id
+         WHERE d.user_id = $1
+           AND s.revoked_at IS NULL
+           AND s.accepted_at IS NOT NULL
+           AND s.kind = 'subscribed'
+           AND d.deleted_at IS NULL
+         GROUP BY s.deck_id, d.title, d.is_public`,
+        [req.user.id]
+      ),
+    ]);
+
+    // Samenvoegen per deck; personen dedupliceren over directe + groepsrijen.
+    const byDeck = new Map();
+    const deckEntry = (row) => {
+      let entry = byDeck.get(row.deck_id);
+      if (!entry) {
+        entry = {
+          deck_id: row.deck_id,
+          deck_title: row.deck_title,
+          is_public: row.is_public,
+          people: [],
+          groups: [],
+          follower_count: 0,
+        };
+        byDeck.set(row.deck_id, entry);
+      }
+      return entry;
+    };
+
+    const personKey = new Map();
+    for (const row of peopleRes.rows) {
+      const entry = deckEntry(row);
+      const key = `${row.deck_id}:${row.recipient_id}`;
+      let person = personKey.get(key);
+      if (!person) {
+        person = {
+          user_id: row.recipient_id,
+          username: row.username,
+          direct: false,
+          // pending = nog géén enkele rij geaccepteerd (dus nog geen toegang)
+          pending: true,
+          can_edit: false,
+          via_groups: [],
+        };
+        personKey.set(key, person);
+        entry.people.push(person);
+      }
+      if (row.kind === "group") person.via_groups.push(row.group_name);
+      else person.direct = true;
+      if (!row.pending) person.pending = false;
+      if (row.can_edit) person.can_edit = true;
+    }
+
+    for (const row of groupsRes.rows) {
+      deckEntry(row).groups.push({
+        group_id: row.group_id,
+        name: row.name,
+        members_with_deck: row.members_with_deck,
+        member_count: row.member_count,
+      });
+    }
+
+    for (const row of followersRes.rows) {
+      deckEntry(row).follower_count = row.follower_count;
+    }
+
+    res.json([...byDeck.values()].sort((a, b) =>
+      a.deck_title.localeCompare(b.deck_title)
+    ));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ========================
+// PUT /decks/:id/permissions/:user_id — owner togglet het edit-recht
+// ========================
+// Zet can_edit op ál iemands niet-gerevokete rijen (direct + groep) tegelijk,
+// zodat het effectieve recht (bool_or) eenduidig blijft — zelfde patroon als
+// share-state. Pending rijen tellen mee: het recht gaat in bij acceptatie.
+// Volger-rijen (kind='subscribed') zijn uitgesloten: vreemden krijgen geen
+// schrijfrecht — edit loopt via een contact-share of groep.
+router.put("/decks/:id/permissions/:user_id", authMiddleware, async (req, res) => {
+  const { id, user_id } = req.params;
+  const { can_edit } = req.body;
+
+  if (!UUID_RE.test(id) || !UUID_RE.test(user_id)) {
+    return res.status(404).json({ error: "Share not found" });
+  }
+  if (typeof can_edit !== "boolean") {
+    return res.status(400).json({ error: "can_edit must be a boolean" });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    // Alleen de eigenaar deelt rechten uit; levend deck vereist.
+    const deckCheck = await client.query(
+      `SELECT d.id FROM decks d
+       WHERE d.id = $1 AND ${isDeckOwnerSql("d", "$2")} AND d.deleted_at IS NULL`,
+      [id, req.user.id]
+    );
+    if (deckCheck.rowCount === 0) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Share not found" });
+    }
+
+    const result = await client.query(
+      `UPDATE deck_shares
+       SET can_edit = $1, updated_at = NOW()
+       WHERE deck_id = $2 AND recipient_id = $3
+         AND revoked_at IS NULL AND kind <> 'subscribed'
+       RETURNING accepted_at`,
+      [can_edit, id, user_id]
+    );
+
+    await client.query("COMMIT");
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Share not found" });
+    }
+
+    // De updated_at-bump levert het deck met de nieuwe can_edit ook via de
+    // eerstvolgende sync-delta; dit event is de directe hint. Alleen sturen
+    // als de recipient het deck al heeft (een pending invite heeft lokaal
+    // nog geen deck om bij te werken).
+    if (result.rows.some((r) => r.accepted_at !== null)) {
+      broadcast(user_id, "deck_access_changed", [{ deck_id: id, can_edit }]);
+    }
+    // Eigen andere devices kunnen een open "Gedeeld met"-paneel verversen.
+    broadcast(req.user.id, "shares_updated", [{ deck_id: id }]);
+
+    res.json({
+      deck_id: id,
+      user_id,
+      can_edit,
+      pending: result.rows.every((r) => r.accepted_at === null),
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
   }
 });
 
@@ -339,12 +544,16 @@ router.post("/decks/:id/follow", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Deck not found" });
     }
 
+    // Her-volgen na revoke/unfollow reset het edit-recht (zelfde regel als
+    // her-delen); volgen op een al actieve rij verandert niets aan het recht.
     const share = await client.query(
       `INSERT INTO deck_shares (deck_id, owner_id, recipient_id, kind)
        VALUES ($1, $2, $3, 'subscribed')
        ON CONFLICT (deck_id, recipient_id) WHERE group_id IS NULL
        DO UPDATE SET revoked_at = NULL, inactive = false, updated_at = NOW(),
-         accepted_at = COALESCE(deck_shares.accepted_at, NOW())
+         accepted_at = COALESCE(deck_shares.accepted_at, NOW()),
+         can_edit = CASE WHEN deck_shares.revoked_at IS NULL
+                         THEN deck_shares.can_edit ELSE false END
        RETURNING *`,
       [id, deckCheck.rows[0].user_id, req.user.id]
     );
