@@ -170,6 +170,14 @@ router.put("/:id", authMiddleware, async (req, res) => {
     // de client één deck-vorm kent (óók in de 409-current).
     const shape = (row) => ({ ...row, role: "owner", owner_username, can_edit: true });
 
+    // Publiek maken is onomkeerbaar (PUBLIC_DECKS_PLAN.md): de UI biedt geen
+    // uit-knop, en ook een directe API-call mag een eenmaal publiek deck niet
+    // terug privé zetten. true → true blijft idempotent oké.
+    if (deck.is_public && is_public === false) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "is_public_irreversible" });
+    }
+
     if (client_updated_at && deck.updated_at > new Date(client_updated_at)) {
       await client.query("ROLLBACK");
       return res.status(409).json({ error: "stale_write", current: shape(deck) });

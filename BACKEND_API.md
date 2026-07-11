@@ -324,12 +324,14 @@ Deck bijwerken. Alleen meegestuurde velden worden bijgewerkt — niet-meegestuur
 
 `inactive` en `core_only` (beide boolean) worden — net als `title`/`tags` — alleen bijgewerkt als ze zijn meegestuurd; ontbreken ze, dan blijft de huidige waarde staan. De `409`-`current` bevat het volledige deck-object, inclusief `inactive` en `core_only`.
 
+**`is_public` is onomkeerbaar** (owner-only, zoals alle deck-metadata): een deck publiek maken kan (`is_public: true`, idempotent), maar een publiek deck terug privé zetten wordt geweigerd met `400` `is_public_irreversible`. Een publiek deck uit de bibliotheek halen kan alleen door het deck te verwijderen.
+
 Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie, wordt `409` teruggegeven. De conflict-check en de update zijn atomair (rij-lock in één transactie): twee apparaten die tegelijk schrijven kunnen elkaars write niet meer stilzwijgend overschrijven.
 
 **Response `200`:** bijgewerkt deck-object
 
 **Foutcodes:**
-- `400` — veld boven de maximale lengte of van het verkeerde type (zelfde limieten als `POST /decks`)
+- `400` — veld boven de maximale lengte of van het verkeerde type (zelfde limieten als `POST /decks`), of `{ "error": "is_public_irreversible" }` bij `is_public: false` op een publiek deck
 - `404` — deck niet gevonden (ook bij een malformed id)
 - `409` — conflict: de server heeft een nieuwere versie
   ```json
@@ -1356,9 +1358,11 @@ Eigenaar geeft een persoon **edit-recht** op dit deck of trekt het in. Edit-rech
 ### GET `/decks/public`
 Publieke bibliotheek (discovery), gepagineerd. Eigen decks worden uitgesloten.
 
-**Query params:** `search` (ILIKE op titel + tags), `limit` (default 20, max 50), `offset`.
+**Query params:** `search` (**verplicht**, minimaal 2 tekens na trimmen; ILIKE-substring op titel + tags, dus ook het midden van een woord matcht), `limit` (default 20, max 50), `offset`.
 
 **Response `200`:** `[ { id, title, description, tags, created_at, owner_username, card_count } ]`
+
+**Foutcodes:** `400` `{ "error": "search_required" }` — geen of te korte zoekterm (er is bewust geen ongefilterde catalogus-listing); `400` `Invalid search` — zoekterm boven de maximale titellengte.
 
 ### POST `/decks/:id/follow` / DELETE `/decks/:id/follow`
 Publiek deck volgen (`201`, share `kind: "subscribed"`, direct geaccepteerd) of een gedeeld deck van je dashboard halen (`204`). Follow op een niet-publiek/onbekend/eigen deck → `404`. **Unfollow geldt voor élke bron** (invited, subscribed én group) — een ontvanger mag altijd zelf afhaken — en is ook het **afwijzen van een openstaande uitnodiging**. Eigen progress op het deck wordt bij unfollow soft-deleted.
@@ -1368,7 +1372,7 @@ Archiefvlag van de **ontvanger** op een gedeeld deck (het enige dat een recipien
 
 **Request body:** `{ "inactive": true }` → **Response `200`:** `{ "deck_id": "…", "inactive": true }`. Geen actieve **geaccepteerde** share → `404`. **Realtime:** `shared_deck_state` naar eigen andere devices.
 
-> Zet de eigenaar `is_public` uit, dan behouden bestaande volgers hun toegang (alleen nieuwe volgers worden geblokkeerd); intrekken kan per recipient via `DELETE /decks/:id/share/:recipient_id`.
+> `is_public` uitzetten bestaat niet meer: publiek maken is onomkeerbaar (`PUT /decks/:id` → `400` `is_public_irreversible`). Een individuele volger intrekken kan via `DELETE /decks/:id/share/:recipient_id`; het deck volledig terugtrekken kan alleen door het te verwijderen.
 
 ---
 

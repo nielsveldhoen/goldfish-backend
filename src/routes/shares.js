@@ -485,13 +485,18 @@ router.get("/decks/public", authMiddleware, publicSearchLimiter, async (req, res
     return res.status(400).json({ error: "Invalid search" });
   }
 
-  const params = [req.user.id];
-  let searchCond = "";
-  if (search) {
-    params.push(`%${search.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`);
-    searchCond = `AND (d.title ILIKE $${params.length}
-                   OR EXISTS (SELECT 1 FROM unnest(d.tags) t WHERE t ILIKE $${params.length}))`;
+  // Zonder zoekterm geen catalogus (PUBLIC_DECKS_PLAN.md): browsen door
+  // álle publieke decks is de duurste variant van deze query en de client
+  // toont bewust geen standaardlijst. Minimaal 2 tekens, net als de client.
+  const term = typeof search === "string" ? search.trim() : "";
+  if (term.length < 2) {
+    return res.status(400).json({ error: "search_required" });
   }
+
+  const params = [req.user.id];
+  params.push(`%${term.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`);
+  const searchCond = `AND (d.title ILIKE $${params.length}
+                   OR EXISTS (SELECT 1 FROM unnest(d.tags) t WHERE t ILIKE $${params.length}))`;
   params.push(limit, offset);
 
   try {
