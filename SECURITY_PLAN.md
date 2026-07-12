@@ -124,34 +124,67 @@ auth-timeout van 5s; het query-token blijft werken zolang oude clients bestaan.
 auth-bericht, en pas daarná (zodra `min_client_build` de oude clients uitsluit) het
 query-token uit `src/ws.js` verwijderen. Beide `BACKEND_API.md`'s beschrijven het overgangspad.
 
-## Fase 3 — Infra-hardening (server; eerst `project_remote_deploy.md` lezen)
+## Fase 3 — Infra-hardening (uitgevoerd 2026-07-12)
 
-**Stap 3.1 — Netwerk-oppervlak.** Alleen 22/80/443 open (ufw/iptables **én** de OCI
-security list — Oracle heeft een eigen firewall-laag). Node bindt op localhost
-(`HOST=127.0.0.1`, zie `src/index.js` — default is nu `0.0.0.0`!), zodat verkeer altijd
-via Caddy loopt.
-*Acceptatie:* portscan van buiten toont alleen 22/80/443; de API-poort direct benaderen faalt.
+> **Correctie t.o.v. de oude versie van dit plan:** de reverse proxy is **nginx** (1.18,
+> Ubuntu), niet Caddy. De `Caddyfile` in de repo is dood gewicht van vóór de
+> domein/TLS-migratie. Configs staan in `/etc/nginx/sites-enabled/{goldfish,api-goldfishstudy}`.
 
-**Stap 3.2 — TLS/headers via Caddy.** HTTPS-redirect, HSTS, moderne TLS-defaults
-verifiëren (niet aannemen dat Caddy het doet).
-*Acceptatie:* SSL Labs / `testssl.sh` grade A; HSTS aanwezig.
+**✅ Stap 3.1 — Netwerk-oppervlak.** Externe portscan: alleen **22/80/443** bereikbaar
+(3000, 5432, 111 en 1022 gefilterd). Verder opgeruimd:
+- `HOST=127.0.0.1` gezet in `src/.env` — de backend bond op `0.0.0.0:3000` en luistert nu
+  alleen nog op loopback (nginx praat er via 127.0.0.1 mee). Defense-in-depth naast iptables.
+- **`rpcbind`** luisterde op `0.0.0.0:111` zonder enige functie voor deze app → gestopt,
+  `disable`d en `mask`ed (rpcbind is een bekende amplificatie-vector als hij ooit open komt te staan).
+- **Weesproces opgeruimd:** een `sshd` van een afgebroken `do-release-upgrade` luisterde
+  sinds 31 mei op poort 1022. Geen upgrade-proces actief; killed.
+- **Nog te doen (OCI-console, alleen Niels):** controleer of de Ingress-regel voor poort
+  3000 nog in de VCN Security List staat en haal hem weg. Extern is 3000 dicht (iptables),
+  dus dit is opruimen, geen gat.
 
-**Stap 3.3 — SSH-hardening.** `PasswordAuthentication no`, root-login uit, alleen key-auth.
-Overweeg fail2ban.
-*Acceptatie:* password-login op SSH geweigerd.
+**✅ Stap 3.2 — TLS/headers (nginx).** HTTP→HTTPS-redirect werkt; Let's Encrypt via certbot
+(`certbot.timer` actief). De **API** stuurde al HSTS + nosniff + frame-options (die komen van
+`helmet()`), maar de **statische frontend** (`goldfishstudy.app`) had géén security-headers →
+toegevoegd (HSTS 1 jaar + includeSubDomains, nosniff, SAMEORIGIN, Referrer-Policy).
+- **Bonus (hoort bij 2.7):** de nginx access-log logde de **volledige query string**, dus het
+  JWT van `/ws?token=...` stond leesbaar in `/var/log/nginx/access.log`. Er is nu een
+  `noquery`-logformaat (`$uri` i.p.v. `$request`) actief op het API-serverblok.
+- Opgeruimd: twee stale backup-configs in `sites-enabled/` (nginx laadde die mee; één
+  serveerde de frontend nog over plain HTTP op het oude, verlopen IP `92.5.235.225`).
 
-**Stap 3.4 — Patches en runtime.** `unattended-upgrades` aan; Node op actieve LTS;
-pm2 start bij boot (`pm2 startup` + `save`).
-*Acceptatie:* unattended-upgrades actief; `node --version` = ondersteunde LTS.
+**✅ Stap 3.3 — SSH-hardening.** `PasswordAuthentication no` stond al goed; `PermitRootLogin`
+stond op `without-password` en is nu **`no`**. Geverifieerd: `ubuntu`-login met key werkt,
+`root@…` wordt geweigerd. `MaxStartups 100:30:200` (uit een eerdere sessie) blijft staan.
+fail2ban is bewust **niet** geïnstalleerd: de SSH-resets kwamen van volle half-open slots,
+en dat is met MaxStartups verholpen.
 
-**Stap 3.5 — Database.** Postgres luistert alleen op localhost; de app-rol (`goldfish`)
-is geen superuser en heeft alleen de nodige rechten; dagelijkse backup (pg_dump +
-retentie, off-box). Een backup is óók een security-maatregel.
-*Acceptatie:* `pg_hba.conf`/`listen_addresses` gecontroleerd; testrestore gelukt.
+**◐ Stap 3.4 — Patches en runtime.**
+- ✅ Node **v22** (actieve LTS); `unattended-upgrades` actief.
+- ✅ **pm2 startte niet bij boot** — er was geen `pm2-ubuntu.service`. `pm2 startup` +
+  `pm2 save` gedaan; na een reboot komt de backend nu vanzelf terug.
+- ⚠️ **OPEN RISICO — OS uit support.** Ubuntu **20.04.6** is sinds mei 2025 uit standaard-
+  support en **Ubuntu Pro is niet gekoppeld** (`pro status` → `attached: False`). Dus
+  `unattended-upgrades` draait wel, maar levert voor een groot deel van de pakketten niets
+  meer. Twee (beide gratis) uitwegen: Ubuntu Pro koppelen (ESM tot 2030, geen reboot) of
+  `do-release-upgrade` naar 22.04 → 24.04 (met snapshot en downtime). **Beslissing bij Niels.**
 
-**Stap 3.6 — `JWT_SECRET` verifiëren.** Controleer dat het ≥32 bytes random is en geen
-woord/zin. Roteren logt iedereen uit → alleen na overleg met Niels.
-*Acceptatie:* sterkte bevestigd of rotatie ingepland.
+**◐ Stap 3.5 — Database.**
+- ✅ Postgres luistert alleen op `localhost`; `pg_hba` staat alleen peer (socket) en md5 op
+  127.0.0.1 toe. App-rol `goldfish` is **geen** superuser (geen createdb/createrole) en heeft
+  alleen DML; alle tabellen zijn eigendom van `postgres`.
+- ✅ **Er was géén enkele backup.** Nu: `/usr/local/bin/goldfish-backup.sh` (pg_dump | gzip),
+  dagelijks 03:30 via `/etc/cron.d/goldfish-backup` als user `postgres`, naar
+  `/var/backups/goldfish`, **14 dagen retentie**, met een sanity-check op de dump. Dumps zijn
+  leesbaar voor groep `ubuntu` (scp), niet voor de wereld.
+- ✅ **Testrestore gelukt**: dump teruggezet in een tijdelijke database; rij-aantallen exact
+  gelijk aan live (3 users, 52 decks, 811 cards, 7 deck_shares, 17 migraties).
+- ⚠️ **Nog te doen: off-box-kopie.** Alles staat nu op dezelfde VM — dat beschermt tegen een
+  `DROP`/bug, niet tegen verlies van de machine. Gekozen richting: **Oracle Object Storage**.
+  Nodig van Niels: een bucket + een **Pre-Authenticated Request (PUT)**-URL uit de OCI-console;
+  daarna is het één regel in `goldfish-backup.sh` (de `UPLOAD_HOOK` staat er al, uitgecommentarieerd).
+
+**✅ Stap 3.6 — `JWT_SECRET`.** 64 hex-tekens = **32 random bytes**. Sterk genoeg; geen rotatie
+nodig (en rotatie logt iedereen uit).
 
 ## Fase 4 — Detectie en proces
 
@@ -186,15 +219,22 @@ Documenteer waar welke persoonsgegevens staan (e-mail staat in `users` en lekt v
 
 - **Fase 1 — klaar.** Geen IDOR, geen secrets in git, geen error-lekken. Eén nieuwe
   bevinding (1.5, e-mail-enumeratie via contacten) → gemitigeerd in 2.6.
-- **Fase 2 — klaar op de frontend-helft van 2.7 na.** Alles draait lokaal, `npm test` groen
-  (267 tests). **Nog niet gedeployd.**
-- **Fase 3 — open.** Vereist servertoegang; eerst `project_remote_deploy.md` lezen.
-  Let bij 3.1 op de `HOST`-default in `src/index.js` (`0.0.0.0`): controleer dat productie
-  `HOST=127.0.0.1` zet.
+- **Fase 2 — klaar op de frontend-helft van 2.7 na.** `npm test` groen (267 tests).
+  **De code staat nog niet op de server** (branch `security-hardening-fase-2`).
+- **Fase 3 — klaar op drie punten na** (die hieronder als ⚠️ staan). De infra-wijzigingen
+  zijn al **live**: ze zitten in de serverconfig, niet in de repo, dus ze wachten niet op een deploy.
 - **Fase 4 — 4.3 grotendeels gedekt; 4.1, 4.2 en 4.4 open.**
 
-Volgende stappen in volgorde: frontend-helft van 2.7 → fase 3 (met Niels, op de server) →
-4.1/4.2 → 4.4 (ontwerp).
+**Wat nog moet — in volgorde:**
+
+1. **Beslissing Niels: OS uit support** (3.4). Ubuntu Pro koppelen (gratis, geen reboot) of
+   upgrade naar 24.04. Zolang dit open staat, krijgt de server voor veel pakketten geen
+   security-patches — dit is nu het grootste openstaande risico.
+2. **Beslissing Niels: off-box backup** (3.5). Bucket + PAR-URL uit de OCI-console.
+3. **Opruimen in de OCI-console** (3.1): eventuele resterende 3000-ingress-regel.
+4. Fase 2 deployen (`git pull` + `pm2 restart`) — geen migratie nodig, geen schema-wijziging.
+5. Frontend-helft van 2.7 (WS-token uit de URL).
+6. Fase 4: 4.1 (security-logging), 4.2 (`npm audit` in DEPLOY.md), 4.4 (account-verwijderflow).
 
 Niet doen zonder overleg: `JWT_SECRET` roteren (logt iedereen uit), JWT-levensduur
 verkorten/refresh-tokens invoeren (grote frontend-impact), dependencies major-updaten.
