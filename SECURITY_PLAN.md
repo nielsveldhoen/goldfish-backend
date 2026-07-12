@@ -116,13 +116,14 @@ door de minimumlengte geweigerd). Geen complexity-regels, geen externe API.
 gebruikers achter dezelfde NAT op één hoop). Geldt voor `POST /v2/contacts` (het
 e-mail-orakel), `POST /v2/decks/:id/share` en `POST /v2/groups/:id/invites`.
 
-**◐ Stap 2.7 — Token uit de WS-URL halen. Backend klaar, frontend open.**
-Het JWT in de query string (`/ws?token=...`) belandt in de Caddy-accesslogs. De server
-accepteert het token nu óók als eerste bericht (`{"type":"auth","token":"..."}`) met een
-auth-timeout van 5s; het query-token blijft werken zolang oude clients bestaan.
-**Nog te doen:** `lib/services/realtime_sync_service.dart` laten overschakelen op het
-auth-bericht, en pas daarná (zodra `min_client_build` de oude clients uitsluit) het
-query-token uit `src/ws.js` verwijderen. Beide `BACKEND_API.md`'s beschrijven het overgangspad.
+**✅ Stap 2.7 — Token uit de WS-URL.** Backend én frontend klaar (frontend 12 juli): de server
+accepteert het token als eerste bericht (`{"type":"auth","token":"..."}`, auth-timeout 5s) en
+`lib/services/realtime_sync_service.dart` stuurt het zo — het JWT staat bij nieuwe builds dus
+niet meer in de URL. Tegen productie geverifieerd (door nginx heen): message-auth → 4001 bij
+fout token, timeout-pad → 4001 na ~5s, oude query-pad werkt nog, en >64 KiB → 1009.
+Als extra vangnet logt nginx sowieso geen query strings meer (zie 3.2).
+*Sluitstuk later:* het query-token-pad uit `src/ws.js` verwijderen zodra `min_client_build`
+de builds van vóór deze wissel uitsluit.
 
 ## Fase 3 — Infra-hardening (uitgevoerd 2026-07-12)
 
@@ -289,9 +290,9 @@ anonimiseren of overdragen — §3 van dat document), daarna migratie + endpoint
 1. **Beslissing Niels (4.4):** gedeelde decks bij een account-delete — verwijderen (huidige
    cascade), anonimiseren of overdragen? Zie §3 van [ACCOUNT_DELETION_PLAN.md](ACCOUNT_DELETION_PLAN.md).
    Daarna pas bouwen.
-2. Frontend-helft van 2.7: `realtime_sync_service.dart` het JWT als auth-**bericht** laten
-   sturen i.p.v. in de WS-URL. De backend accepteert beide; de nginx-log logt inmiddels geen
-   query strings meer, dus het token lekt daar al niet meer in.
+2. **Later, geen haast:** het query-token-pad uit `src/ws.js` verwijderen zodra
+   `min_client_build` de oude builds uitsluit (2.7-sluitstuk), en vóór de PAR-expiry een
+   nieuwe upload-URL zetten (3.5).
 
 **Fase 2 is gedeployd** (12 juli): `git pull` + `npm ci` (de audit-fixes zaten in de lockfile) +
 `pm2 restart`. Live geverifieerd: `RateLimit-Policy: 600;w=900` op `/v2`, blocklist weigert

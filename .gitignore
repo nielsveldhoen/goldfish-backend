@@ -1,3 +1,8 @@
 node_modules/
+# .env en alle kopieën ervan (.env.bak-*): zelfde secrets. Bewust géén .env*
+# — dat zou ook .env.example vangen, en die hoort juist wél in git.
 .env
+.env.bak*
+src/.env
+src/.env.bak*
 .claude/
