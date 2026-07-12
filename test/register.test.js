@@ -46,7 +46,7 @@ describe("POST /auth/register", () => {
     const sendMock = t.mock.method(mailer, "sendVerificationEmail", async () => {});
 
     const email = freshEmail();
-    const res = await register({ email, password: "wachtwoord123" });
+    const res = await register({ email, password: "correct-paard-accu-42" });
 
     assert.equal(res.status, 200);
     assert.equal(res.body.email_sent, true);
@@ -64,11 +64,11 @@ describe("POST /auth/register", () => {
     const existsMock = t.mock.method(mailer, "sendAccountExistsEmail", async () => {});
 
     const email = freshEmail();
-    const first = await register({ email, password: "wachtwoord123" });
+    const first = await register({ email, password: "correct-paard-accu-42" });
     assert.equal(first.status, 200);
     createdUserIds.push((await userByEmail(email)).id);
 
-    const dup = await register({ email, password: "anderwachtwoord" });
+    const dup = await register({ email, password: "ander-paard-accu-77" });
     assert.equal(dup.status, 200);
     assert.deepEqual(dup.body, first.body, "dup-response moet byte-gelijk zijn aan succes-response");
     assert.equal(existsMock.mock.callCount(), 1);
@@ -82,11 +82,11 @@ describe("POST /auth/register", () => {
     t.mock.method(mailer, "sendVerificationEmail", async () => {});
 
     const username = `dupname-${crypto.randomBytes(6).toString("hex")}`;
-    const first = await register({ email: freshEmail(), username, password: "wachtwoord123" });
+    const first = await register({ email: freshEmail(), username, password: "correct-paard-accu-42" });
     assert.equal(first.status, 200);
     createdUserIds.push((await pool.query(`SELECT id FROM users WHERE username = $1`, [username])).rows[0].id);
 
-    const dup = await register({ email: freshEmail(), username, password: "wachtwoord123" });
+    const dup = await register({ email: freshEmail(), username, password: "correct-paard-accu-42" });
     assert.equal(dup.status, 400);
     assert.equal(dup.body.error, "Username already taken");
   });
@@ -97,7 +97,7 @@ describe("POST /auth/register", () => {
     });
 
     const email = freshEmail();
-    const res = await register({ email, password: "wachtwoord123" });
+    const res = await register({ email, password: "correct-paard-accu-42" });
 
     assert.equal(res.status, 200);
     assert.equal(res.body.email_sent, false);

@@ -87,8 +87,10 @@ Registreer een nieuwe gebruiker. Na registratie wordt een verificatiemail gestuu
 
 > **Anti-enumeration:** bestaat het e-mailadres al, dan is de response *identiek* aan een geslaagde registratie (`200`) — er wordt dan geen account aangemaakt maar een "je hebt al een account"-mail gestuurd die naar de wachtwoord-reset wijst. De client kan een bestaand adres dus niet aan de response aflezen; dat is bewust.
 
+> **Wachtwoord-blocklist:** naast de lengte-eis (8–128) wordt het wachtwoord getoetst aan een lijst van veelgelekte wachtwoorden (`password123`, `welkom123`, `qwerty123`, …; case-insensitief). Staat het erop → `400` `{ "error": "This password is too common. Choose a less predictable password." }`. Er zijn **geen** complexity-regels (hoofdletters/cijfers/tekens). Dezelfde toets geldt bij de wachtwoord-reset.
+
 **Foutcodes:**
-- `400` — ontbrekende velden, wachtwoord korter dan 8 of langer dan 128 tekens, e-mail/username boven de maximale lengte, of username al bezet (`"Username already taken"`, alleen wanneer het e-mailadres nog vrij is)
+- `400` — ontbrekende velden, wachtwoord korter dan 8 of langer dan 128 tekens, wachtwoord op de blocklist, e-mail/username boven de maximale lengte, of username al bezet (`"Username already taken"`, alleen wanneer het e-mailadres nog vrij is)
 
 ---
 
@@ -187,7 +189,7 @@ Vraag een wachtwoord-reset-link aan. Geeft altijd dezelfde response terug, ook a
 Browser-flow voor de reset-link uit de mail — de client hoeft hier niets mee, maar voor de volledigheid: `GET ?token=...` toont een HTML-formulier; de `POST` (formulier of JSON `{ "token", "password" }`) voert de reset uit. Deze routes staan **buiten** het `/v2`-prefix en buiten de client-versiegate, omdat een browser geen `X-Client-Build` meestuurt.
 
 Een geslaagde reset:
-- zet het nieuwe wachtwoord (8–128 tekens),
+- zet het nieuwe wachtwoord (8–128 tekens, en niet op de wachtwoord-blocklist — zie `POST /auth/register`),
 - zet `email_verified = true` (de reset bewijst bezit van de mailbox),
 - **trekt alle bestaande JWT's van de gebruiker in** — elk apparaat krijgt op zijn eerstvolgende call een `401` en moet opnieuw inloggen.
 
@@ -1247,7 +1249,9 @@ Verwerking:
 3. Bestaat er al een relatie tussen dit paar (welke richting/status dan ook) → `409` `{ "error": "already_exists" }`.
 4. Anders: maak de relatie aan (`pending`).
 
-> **Let op — e-mail enumeration:** `404 user_not_found` onthult of een adres een account is. Dit wijkt bewust af van het anti-enumeration-gedrag bij `/auth/register` en `/auth/forgot-password`, omdat de contacten-UX ("geen gebruiker met dit adres") het nodig heeft. Bewust geaccepteerd.
+> **Let op — e-mail enumeration:** `404 user_not_found` onthult of een adres een account is. Dit wijkt bewust af van het anti-enumeration-gedrag bij `/auth/register` en `/auth/forgot-password`, omdat de contacten-UX ("geen gebruiker met dit adres") het nodig heeft. Bewust geaccepteerd, maar **wel afgeremd**: zie de rate limit hieronder.
+
+**Rate limit:** 30 verzoeken per 15 minuten, geteld **per gebruiker** (niet per IP). Overschrijding → `429` `{ "error": "Too many invitations, try again later" }`. Dezelfde limiter geldt voor `POST /decks/:id/share` en `POST /groups/:id/invites`.
 
 **Response `201`:** het contact-object t.o.v. de **afzender** (`status: "pending_outgoing"`, `user_id` = de uitgenodigde).
 
@@ -1294,6 +1298,8 @@ Deel een eigen deck met een geaccepteerd contact. Maakt een **uitnodiging** aan 
 - `recipient_id` geen wederzijds geaccepteerd contact → `403` `{ "error": "not_a_contact" }`.
 - Jezelf → `400` `{ "error": "cannot_share_with_self" }`.
 - Her-delen na intrekken/afwijzen = upsert → nieuwe uitnodiging, met **gereset edit-recht** (`can_edit: false`). Her-delen van een nog openstaande of al geaccepteerde share verandert de status én het edit-recht niet (dubbel delen degradeert niets).
+
+**Rate limit:** 30 verzoeken per 15 minuten **per gebruiker** (gedeeld met `POST /contacts` en `POST /groups/:id/invites`) → `429`.
 
 **Response `201`:** de share-rij. **Realtime:** `share_received` naar de ontvanger — alleen zolang het een openstaande uitnodiging is.
 
@@ -1428,7 +1434,7 @@ Owner: `{ "password": "…" }` → `200`. Wissel het wachtwoord na een kick — 
 Owner heft de groep op → `204`. Alle groepsshares worden gerevoket (+ progress-cascade waar het de laatste toegangsbron was). **Realtime:** `group_removed` naar alle leden, `deck_removed` naar getroffen recipients.
 
 ### POST `/groups/:id/invites`
-Actief lid nodigt een **eigen geaccepteerd contact** uit: `{ "user_id": "uuid" }` → `201`. Geen contact → `403` `{ "error": "not_a_contact" }`; al lid/uitgenodigd → `409`. **Realtime:** `group_invite_received` naar het doelwit, `group_updated` naar de leden.
+Actief lid nodigt een **eigen geaccepteerd contact** uit: `{ "user_id": "uuid" }` → `201`. Geen contact → `403` `{ "error": "not_a_contact" }`; al lid/uitgenodigd → `409`. **Rate limit:** 30 per 15 minuten **per gebruiker** (gedeeld met `POST /contacts` en `POST /decks/:id/share`) → `429`. **Realtime:** `group_invite_received` naar het doelwit, `group_updated` naar de leden.
 
 ### POST `/groups/:id/invites/accept` / DELETE `/groups/:id/invites`
 De uitgenodigde accepteert (→ `200` group-object, lid wordt `active`) of wijst af (→ `204`, member-rij hard verwijderd). **Realtime:** `group_updated` resp. `group_removed` (eigen devices) + `group_updated` (leden).
@@ -1456,12 +1462,32 @@ Realtime push-notificaties voor alle schrijfoperaties. De server broadcast naar 
 
 ### Verbinding maken
 
-```
-wss://<domein>/ws?token=<jwt>        (productie)
-ws://localhost:3000/ws?token=<jwt>   (lokaal)
-```
+Er zijn twee manieren om te authenticeren. **Voorkeur: het auth-bericht** — een query string belandt in de access-logs van de reverse proxy, een WebSocket-bericht niet.
 
-Het JWT-token wordt als query-parameter meegestuurd. Bij een ongeldig of ontbrekend token sluit de server de verbinding met sluitcode `4001`. Verloopt het token terwijl de verbinding openstaat, dan sluit de server de verbinding eveneens met `4001`. Bij `4001` moet de client **niet** automatisch reconnecten, maar opnieuw inloggen.
+**(a) Token als eerste bericht (aanbevolen):**
+```
+wss://<domein>/ws        (productie)
+ws://localhost:3000/ws   (lokaal)
+```
+Stuur direct na `open` als eerste bericht:
+```json
+{ "type": "auth", "token": "<jwt>" }
+```
+De server heeft **5 seconden** om het auth-bericht te ontvangen; blijft het uit, dan sluit hij met `4001`. Vóór authenticatie worden andere berichten genegeerd (de timeout loopt door). Bij succes volgt geen bevestiging — de verbinding blijft simpelweg open en events beginnen te stromen.
+
+**(b) Token in de query string (verouderd, blijft voorlopig werken):**
+```
+wss://<domein>/ws?token=<jwt>
+```
+Dit pad blijft ondersteund zolang er clients zijn die het gebruiken, maar verdwijnt zodra `min_client_build` de oude clients uitsluit. Nieuwe clients gebruiken (a).
+
+**Sluitcodes:**
+
+| Code | Betekenis | Reconnecten? |
+|------|-----------|--------------|
+| `4001` | Ongeldig, ontbrekend of verlopen token (ook: auth-timeout). Verloopt het token terwijl de verbinding openstaat, dan sluit de server eveneens met `4001`. | **Nee** — opnieuw inloggen |
+| `4002` | Te veel gelijktijdige verbindingen voor deze gebruiker (max. 10); de **oudste** socket wordt gesloten om plaats te maken | Ja (met backoff) |
+| `1009` | Bericht groter dan 64 KiB (`maxPayload`) | Ja |
 
 ### Berichtformaat
 
@@ -1511,7 +1537,8 @@ Bulk-endpoints sturen dus **één** event met alle items in de array (geen event
 
 - De server beantwoordt WebSocket `ping`-frames altijd met een `pong`-frame. Gebruik dit om de verbinding levend te houden.
 - De server stuurt zelf periodiek (elke ~30 s) een `ping`-frame en sluit verbindingen die niet binnen ~60 s ponggen. Native WebSocket-implementaties beantwoorden pings automatisch; daar hoeft de client niets voor te doen.
-- Tekstberichten van de client maken geen deel uit van het protocol en worden genegeerd (ook onparseerbare, zoals de losse string `"ping"` van oudere clients); ze veroorzaken nooit een disconnect.
+- Behalve het auth-bericht (zie "Verbinding maken") maken tekstberichten van de client geen deel uit van het protocol: ze worden genegeerd (ook onparseerbare, zoals de losse string `"ping"` van oudere clients) en veroorzaken nooit een disconnect.
+- **Limieten:** berichten mogen maximaal **64 KiB** zijn (groter → close `1009`) en een gebruiker mag maximaal **10** gelijktijdige verbindingen open hebben (bij een 11e sluit de server de oudste met `4002`).
 
 ---
 
@@ -1532,3 +1559,18 @@ Alle fouten hebben het formaat:
 ```json
 { "error": "Omschrijving van het probleem" }
 ```
+
+### Rate limits (overzicht)
+
+Alle vensters zijn 15 minuten; overschrijding geeft `429`.
+
+| Bereik | Limiet | Geteld per |
+|--------|--------|------------|
+| Hele `/v2`-API (vangnet) | 600 verzoeken | IP |
+| `/auth/*` (register, login, resend, forgot) | 20 | IP |
+| `/auth/reset-password`, `/auth/verify-email` (browser-flows) | 20 | IP |
+| `POST /groups/join` | 20 | IP |
+| `GET /decks/public` | 120 | IP |
+| `POST /contacts`, `POST /decks/:id/share`, `POST /groups/:id/invites` | 30 | **gebruiker** |
+
+De globale limiet van 600/15 min ligt ruim boven normaal client-gedrag (een actieve sessie doet er tientallen); een client die hem raakt, doet iets ongebruikelijks. De per-gebruiker-limiet op de uitnodigingsroutes remt zowel spam als het e-mail-orakel van `POST /contacts` af.

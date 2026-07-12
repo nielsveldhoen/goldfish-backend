@@ -1,6 +1,7 @@
 import express from "express";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { inviteLimiter } from "../middleware/limiters.js";
 import { broadcast } from "../ws.js";
 import { LIMITS } from "../utils/validate.js";
 
@@ -91,7 +92,12 @@ router.get("/", authMiddleware, async (req, res) => {
 // ========================
 // INVITE (op e-mailadres)
 // ========================
-router.post("/", authMiddleware, async (req, res) => {
+// Gelimiteerd per user (SECURITY_PLAN 2.6): deze route zegt met 404
+// user_not_found of een e-mailadres een Goldfish-account heeft. Dat orakel is
+// onvermijdelijk — de UX moet kunnen melden dat iemand er nog niet op zit —
+// maar ongelimiteerd zou het een e-mailadressen-scanner zijn. De limiter staat
+// ná authMiddleware zodat hij op user-id kan sleutelen.
+router.post("/", authMiddleware, inviteLimiter, async (req, res) => {
   const { email } = req.body;
 
   if (typeof email !== "string" || email.length > LIMITS.EMAIL_MAX || !EMAIL_RE.test(email)) {

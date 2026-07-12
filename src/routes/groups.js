@@ -15,6 +15,7 @@ import argon2 from "argon2";
 import rateLimit from "express-rate-limit";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { inviteLimiter } from "../middleware/limiters.js";
 import { broadcast, broadcastGroup } from "../ws.js";
 import { LIMITS, invalidString, invalidBoolean, firstError } from "../utils/validate.js";
 import { revokeShares } from "../utils/deckAccess.js";
@@ -423,7 +424,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
 // ========================
 // POST /groups/:id/invites — contact uitnodigen (elk actief lid)
 // ========================
-router.post("/:id/invites", authMiddleware, async (req, res) => {
+router.post("/:id/invites", authMiddleware, inviteLimiter, async (req, res) => {
   const { id } = req.params;
   const { user_id } = req.body;
 

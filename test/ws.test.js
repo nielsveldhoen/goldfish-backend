@@ -8,9 +8,11 @@ import WebSocket from "ws";
 import "../src/config/env.js";
 import { pool } from "../src/db.js";
 
-// Korte heartbeat zodat de expiry-check in de test snel draait;
-// moet gezet zijn vóór ws.js geïmporteerd wordt.
+// Korte heartbeat zodat de expiry-check in de test snel draait, en een korte
+// auth-timeout zodat het "geen token"-pad niet 5s hoeft te wachten; beide
+// moeten gezet zijn vóór ws.js geïmporteerd wordt.
 process.env.WS_HEARTBEAT_INTERVAL_MS = "200";
+process.env.WS_AUTH_TIMEOUT_MS = "300";
 const { createWsServer, broadcast } = await import("../src/ws.js");
 const { createUser, cleanupUser, closePool } = await import("./helpers.js");
 
@@ -56,7 +58,9 @@ function waitForOpen(socket) {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("WebSocket auth en robuustheid", () => {
-  test("zonder token → close 4001", async () => {
+  // Zonder token in de URL wacht de server op een auth-bericht (SECURITY_PLAN
+  // 2.7); komt dat niet binnen de auth-timeout, dan alsnog 4001.
+  test("zonder token → close 4001 na de auth-timeout", async () => {
     const { code } = await waitForClose(connect(""));
     assert.equal(code, 4001);
   });

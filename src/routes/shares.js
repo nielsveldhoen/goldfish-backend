@@ -6,6 +6,7 @@ import express from "express";
 import rateLimit from "express-rate-limit";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { inviteLimiter } from "../middleware/limiters.js";
 import { broadcast, broadcastDeck } from "../ws.js";
 import { LIMITS } from "../utils/validate.js";
 import { isDeckOwnerSql, revokeShares } from "../utils/deckAccess.js";
@@ -37,7 +38,7 @@ function notifyRemoved(removedPairs) {
 // ========================
 // POST /decks/:id/share — delen met een geaccepteerd contact
 // ========================
-router.post("/decks/:id/share", authMiddleware, async (req, res) => {
+router.post("/decks/:id/share", authMiddleware, inviteLimiter, async (req, res) => {
   const { id } = req.params;
   const { recipient_id } = req.body;
 

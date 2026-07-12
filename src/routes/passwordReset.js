@@ -4,6 +4,7 @@ import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 import { pool } from "../db.js";
 import { LIMITS } from "../utils/validate.js";
+import { isCommonPassword, COMMON_PASSWORD_ERROR } from "../utils/commonPasswords.js";
 
 // Browser-flow voor de wachtwoord-reset. De link uit de mail
 // (APP_URL/auth/reset-password?token=...) opent in een browser, dus deze
@@ -149,6 +150,12 @@ router.post("/", resetLimiter, async (req, res) => {
   // onnodig traag.
   if (password.length > LIMITS.PASSWORD_MAX) {
     return fail(400, formPage(token, `Wachtwoord mag maximaal ${LIMITS.PASSWORD_MAX} tekens zijn.`), `Password too long (max ${LIMITS.PASSWORD_MAX} characters)`);
+  }
+
+  // Zelfde blocklist als bij registratie — een reset is geen achterdeur om
+  // alsnog "password123" in te stellen.
+  if (isCommonPassword(password)) {
+    return fail(400, formPage(token, "Dit wachtwoord is te vaak gelekt. Kies een minder voorspelbaar wachtwoord."), COMMON_PASSWORD_ERROR);
   }
 
   // `confirm` komt alleen van het browserformulier; JSON-callers laten hem weg.

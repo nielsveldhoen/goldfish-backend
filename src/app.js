@@ -16,6 +16,7 @@ import contactRoutes from "./routes/contacts.js";
 import shareRoutes from "./routes/shares.js";
 import groupRoutes from "./routes/groups.js";
 import { requireClientVersion, minClientBuild } from "./middleware/clientVersion.js";
+import { apiLimiter } from "./middleware/limiters.js";
 
 const app = express();
 
@@ -114,6 +115,10 @@ app.use("/auth/verify-email", verifyEmailRoutes);
 // Alle API-routes zitten onder een expliciet versie-prefix en achter de
 // client-versiegate. Nu alleen /v2; een toekomstige versie krijgt een eigen
 // mount (bijv. app.use("/v3", apiV3)).
-app.use("/v2", requireClientVersion, api);
+//
+// apiLimiter is het vangnet per IP over de hele API (SECURITY_PLAN 2.3); de
+// strengere limiters per route (auth, join, publieke zoek, uitnodigen) staan
+// daar los naast.
+app.use("/v2", apiLimiter, requireClientVersion, api);
 
 export default app;

@@ -7,26 +7,86 @@ const JWT_SECRET = process.env.JWT_SECRET;
 
 // Close code waarmee de client stopt met reconnecten (auth definitief mislukt).
 const CLOSE_UNAUTHORIZED = 4001;
+// Verbindingslimiet overschreden: de oudste socket gaat dicht. Bewust géén
+// 4001 — die socket is niet ongeautoriseerd en de client mag reconnecten.
+const CLOSE_TOO_MANY = 4002;
 
 // Server-side heartbeat: elke HEARTBEAT_INTERVAL_MS een ping-frame; wie dan
 // nog niet op de vorige ping heeft gepongd (≈ 2 intervallen ≈ 60s) gaat dicht.
 const HEARTBEAT_INTERVAL_MS = Number(process.env.WS_HEARTBEAT_INTERVAL_MS) || 30_000;
 
+// Grootste bericht dat een client mag sturen. Clients sturen alleen pings en
+// (nieuw) het auth-bericht; de ws-default van 100 MiB is een gratis
+// geheugen-DoS. Groter bericht → ws sluit de socket met 1009.
+const MAX_PAYLOAD_BYTES = 64 * 1024;
+
+// Max gelijktijdige sockets per gebruiker. Ruim boven "telefoon + tablet +
+// laptop, allemaal met een herstelde verbinding", laag genoeg dat één account
+// de server niet kan volpompen met open verbindingen.
+const MAX_SOCKETS_PER_USER = 10;
+
+// Tijd die een client krijgt om zijn token te sturen als het niet in de URL
+// staat (zie authenticatie hieronder).
+const AUTH_TIMEOUT_MS = Number(process.env.WS_AUTH_TIMEOUT_MS) || 5_000;
+
 // userId → Set<WebSocket>
 const connections = new Map();
 
+// Token uit het auth-bericht ({"type":"auth","token":"..."}), of null.
+function authTokenFrom(data) {
+  try {
+    const msg = JSON.parse(data.toString());
+    if (msg?.type === "auth" && typeof msg.token === "string") return msg.token;
+  } catch {
+    // Geen JSON: geen auth-bericht.
+  }
+  return null;
+}
+
 export function createWsServer(server) {
-  const wss = new WebSocketServer({ server, path: "/ws" });
+  const wss = new WebSocketServer({
+    server,
+    path: "/ws",
+    maxPayload: MAX_PAYLOAD_BYTES,
+  });
 
-  wss.on("connection", async (socket, req) => {
+  // Authenticatie kan op twee manieren:
+  //   (a) token als eerste WS-bericht — voorkeur: de query string van een
+  //       WS-upgrade belandt in de Caddy-accesslogs, het bericht niet;
+  //   (b) token in de query string (?token=...) — het oude pad, blijft werken
+  //       zolang er clients zijn die het zo sturen (zie SECURITY_PLAN 2.7).
+  wss.on("connection", (socket, req) => {
     const url = new URL(req.url, "http://localhost");
-    const token = url.searchParams.get("token");
+    const queryToken = url.searchParams.get("token");
 
-    if (!token) {
-      socket.close(CLOSE_UNAUTHORIZED, "Unauthorized");
+    if (queryToken) {
+      authenticate(socket, queryToken);
       return;
     }
 
+    // Geen token in de URL: wachten op het auth-bericht. Wie binnen de timeout
+    // niets bruikbaars stuurt, gaat dicht — anders houdt een anonieme client
+    // gratis een socket open.
+    const timer = setTimeout(() => {
+      socket.close(CLOSE_UNAUTHORIZED, "Unauthorized");
+    }, AUTH_TIMEOUT_MS);
+
+    const onAuthMessage = (data) => {
+      const token = authTokenFrom(data);
+      if (!token) return; // ander bericht vóór auth: negeren, timeout loopt door
+      clearTimeout(timer);
+      socket.off("message", onAuthMessage);
+      authenticate(socket, token);
+    };
+
+    socket.on("message", onAuthMessage);
+    socket.on("close", () => clearTimeout(timer));
+    // Vóór authenticatie is er nog geen error-handler; zonder deze gooit een
+    // socket-error een uncaught exception op.
+    socket.on("error", () => {});
+  });
+
+  async function authenticate(socket, token) {
     let userId;
     let decoded;
     try {
@@ -62,10 +122,27 @@ export function createWsServer(server) {
     // hem dan niet meer (anders blijft hij als wees in `connections` hangen).
     if (socket.readyState !== WebSocket.OPEN) return;
 
+    register(socket, userId);
+  }
+
+  function register(socket, userId) {
     socket.isAlive = true;
+    socket.userId = userId; // markeert de socket als geauthenticeerd (heartbeat)
 
     if (!connections.has(userId)) connections.set(userId, new Set());
-    connections.get(userId).add(socket);
+    const sockets = connections.get(userId);
+
+    // Verbindingslimiet: de oudste sockets wijken voor de nieuwe. Een Set houdt
+    // insertion order aan, dus values().next() is de oudste. Nieuwe verbindingen
+    // weigeren zou een gebruiker met tien dode sockets buitensluiten; de oudste
+    // opruimen is bijna altijd precies de bedoeling.
+    while (sockets.size >= MAX_SOCKETS_PER_USER) {
+      const oldest = sockets.values().next().value;
+      sockets.delete(oldest);
+      oldest.close(CLOSE_TOO_MANY, "Too many connections");
+    }
+
+    sockets.add(socket);
 
     // Op ping-frames antwoordt ws zelf al met pong (autoPong). Pongs van onze
     // eigen heartbeat-pings markeren de verbinding als levend.
@@ -73,8 +150,9 @@ export function createWsServer(server) {
       socket.isAlive = true;
     });
 
-    // Clients sturen soms tekstberichten (oudere clients: de string "ping").
-    // Die zijn geen onderdeel van het protocol: negeren, nooit crashen.
+    // Clients sturen soms tekstberichten (oudere clients: de string "ping",
+    // nieuwe clients een tweede auth-bericht na een reconnect). Die zijn geen
+    // onderdeel van het protocol: negeren, nooit crashen.
     socket.on("message", (data) => {
       try {
         JSON.parse(data.toString());
@@ -95,10 +173,15 @@ export function createWsServer(server) {
       connections.get(userId)?.delete(socket);
       if (connections.get(userId)?.size === 0) connections.delete(userId);
     });
-  });
+  }
 
   const heartbeat = setInterval(() => {
     for (const socket of wss.clients) {
+      // Nog niet geauthenticeerd: die socket wordt door de auth-timeout
+      // bewaakt, niet door de heartbeat (anders termineert de heartbeat hem
+      // met 1006 vóór hij zijn token heeft kunnen sturen).
+      if (!socket.userId) continue;
+
       if (socket.tokenExpiresAt && socket.tokenExpiresAt <= Date.now()) {
         socket.close(CLOSE_UNAUTHORIZED, "Token expired");
         continue;

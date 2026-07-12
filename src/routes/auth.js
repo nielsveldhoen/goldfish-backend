@@ -7,6 +7,7 @@ import { generateToken } from "../utils/generateToken.js";
 import { sendVerificationEmail, mailer } from "../utils/sendVerificationEmail.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { LIMITS } from "../utils/validate.js";
+import { isCommonPassword, COMMON_PASSWORD_ERROR } from "../utils/commonPasswords.js";
 
 const router = express.Router();
 
@@ -14,6 +15,13 @@ const router = express.Router();
 // de gebruiker krijgt het ruwe token per mail.
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
+
+// Dummy-hash voor het onbekende-user-pad bij login. Zonder deze verify is het
+// antwoord op een niet-bestaand account meetbaar sneller dan op een bestaand
+// account met fout wachtwoord — dan is de anti-enumeration van register/forgot
+// alsnog te omzeilen via de klok. Eén keer berekend bij het opstarten, over een
+// random string zodat de hash zelf niets prijsgeeft.
+const dummyHash = argon2.hash(crypto.randomBytes(32).toString("hex"));
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -58,6 +66,12 @@ router.post("/register", authLimiter, async (req, res) => {
   if (username !== undefined && username !== null
       && (typeof username !== "string" || username.length > LIMITS.USERNAME_MAX)) {
     return res.status(400).json({ error: `Username too long (max ${LIMITS.USERNAME_MAX} characters)` });
+  }
+
+  // Geen complexity-regels (die leveren vooral "Passw0rd!"), wél een blocklist:
+  // de wachtwoorden die in elke credential-stuffing-lijst bovenaan staan.
+  if (isCommonPassword(password)) {
+    return res.status(400).json({ error: COMMON_PASSWORD_ERROR });
   }
 
   const emailNormalized = email.toLowerCase().trim();
@@ -196,13 +210,14 @@ router.post("/login", authLimiter, async (req, res) => {
 
     const user = result.rows[0];
 
-    if (!user) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
+    // Ook zonder user één argon2.verify draaien (tegen de dummy-hash): beide
+    // paden kosten dan even veel tijd, zodat "bestaat dit account?" niet uit de
+    // responstijd valt af te lezen.
+    const valid = await argon2
+      .verify(user ? user.password_hash : await dummyHash, password)
+      .catch(() => false); // corrupt/legacy hash telt als ongeldig, niet als 500
 
-    const valid = await argon2.verify(user.password_hash, password);
-
-    if (!valid) {
+    if (!user || !valid) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
