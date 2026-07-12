@@ -17,6 +17,7 @@ import shareRoutes from "./routes/shares.js";
 import groupRoutes from "./routes/groups.js";
 import { requireClientVersion, minClientBuild } from "./middleware/clientVersion.js";
 import { apiLimiter } from "./middleware/limiters.js";
+import { securityEvent, clientIp } from "./utils/securityLog.js";
 
 const app = express();
 
@@ -120,5 +121,36 @@ app.use("/auth/verify-email", verifyEmailRoutes);
 // strengere limiters per route (auth, join, publieke zoek, uitnodigen) staan
 // daar los naast.
 app.use("/v2", apiLimiter, requireClientVersion, api);
+
+// Sluitstuk: geen enkele fout mag als stack trace of DB-detail bij de client
+// belanden (SECURITY_PLAN 1.4). Express 5 vangt ook rejections uit async
+// handlers en stuurt ze hierheen; zonder deze handler antwoordt Express met een
+// HTML-pagina die in development de stack bevat.
+//
+// Het enige geval dat de client écht moet kunnen onderscheiden is een te grote
+// body: die komt van body-parser met status 413 (of 400 bij kapotte JSON), en
+// een client die dat als "server stuk" leest, blijft eindeloos hetzelfde te
+// grote bericht opnieuw sturen.
+app.use((err, req, res, _next) => {
+  if (res.headersSent) return;
+
+  if (err.type === "entity.too.large") {
+    securityEvent("payload_too_large", {
+      ip: clientIp(req),
+      method: req.method,
+      path: req.originalUrl.split("?")[0],
+      limit: err.limit,
+    });
+    return res.status(413).json({ error: "Payload too large" });
+  }
+
+  // Onparseerbare of verkeerd-getypeerde JSON: een clientfout, geen serverfout.
+  if (err.type === "entity.parse.failed" || err.status === 400) {
+    return res.status(400).json({ error: "Invalid request body" });
+  }
+
+  console.error("unhandled error:", err);
+  res.status(500).json({ error: "Server error" });
+});
 
 export default app;

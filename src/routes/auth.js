@@ -1,11 +1,12 @@
 import express from "express";
 import argon2 from "argon2";
 import crypto from "crypto";
-import rateLimit from "express-rate-limit";
 import { pool } from "../db.js";
 import { generateToken } from "../utils/generateToken.js";
 import { sendVerificationEmail, mailer } from "../utils/sendVerificationEmail.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { authLimiter } from "../middleware/limiters.js";
+import { securityEvent, clientIp } from "../utils/securityLog.js";
 import { LIMITS } from "../utils/validate.js";
 import { isCommonPassword, COMMON_PASSWORD_ERROR } from "../utils/commonPasswords.js";
 
@@ -22,14 +23,6 @@ const hashToken = (token) =>
 // alsnog te omzeilen via de klok. Eén keer berekend bij het opstarten, over een
 // random string zodat de hash zelf niets prijsgeeft.
 const dummyHash = argon2.hash(crypto.randomBytes(32).toString("hex"));
-
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { error: "Too many attempts, try again later" },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
 
 // HEALTH CHECK
 router.get("/ping", (req, res) => {
@@ -218,10 +211,22 @@ router.post("/login", authLimiter, async (req, res) => {
       .catch(() => false); // corrupt/legacy hash telt als ongeldig, niet als 500
 
     if (!user || !valid) {
+      // Géén identifier in het log (zie utils/securityLog.js): de reden-code
+      // volstaat om een aanval te herkennen, en zo lekt het log zelf geen
+      // e-mailadressen.
+      securityEvent("login_failed", {
+        ip: clientIp(req),
+        reason: user ? "bad_password" : "unknown_account",
+      });
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
     if (!user.email_verified) {
+      securityEvent("login_blocked", {
+        ip: clientIp(req),
+        user_id: user.id,
+        reason: "email_unverified",
+      });
       return res.status(403).json({ error: "Email not verified" });
     }
 

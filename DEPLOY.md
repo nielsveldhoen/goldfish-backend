@@ -1,110 +1,130 @@
-# Goldfish backend — deploy- en migratienotitie
+# Goldfish backend — deploy
 
-## Wat er nodig is
+De server draait op **Oracle Cloud (Always Free)**, achter **nginx**, met **pm2** als
+procesmanager. Deze notitie beschrijft de deploy zoals hij nu écht werkt — een eerdere versie
+beschreef nog Caddy; dat klopt niet meer sinds de domein/TLS-migratie.
 
-- **Domeinnaam** met een A-record (en evt. AAAA-record) dat naar het
-  server-IP wijst, bijv. `api.goldfish.example`.
-- **Open poorten: 80 en 443** (80 voor de Let's Encrypt ACME-challenge en de
-  automatische http→https-redirect, 443 voor het verkeer zelf). Poort 3000
-  hoeft (en hoort) NIET open te staan naar buiten.
-- **Caddy** als reverse proxy (termineert TLS, regelt certificaten
-  automatisch): https://caddyserver.com/docs/install
+## Productie in het kort
 
-## Stappen
+| | |
+|---|---|
+| Server | Ubuntu 24.04 LTS, `ubuntu@141.148.226.78` (static reserved IP) |
+| Repo op de server | `/home/ubuntu/goldfish/goldfish-backend` |
+| Proces | pm2, naam **`goldfish-backend`** (start automatisch bij boot) |
+| Reverse proxy | nginx → `127.0.0.1:3000`; TLS via Let's Encrypt/certbot |
+| Database | PostgreSQL 16, alleen op localhost; app-rol `goldfish` (DML-only) |
+| Env | **`src/.env`** (let op: niet in de repo-root), staat niet in git |
+| Backups | dagelijks 03:30 → `/var/backups/goldfish` + off-box naar OCI Object Storage |
 
-### 1. Database-migraties (als `postgres`-superuser)
+---
 
-De SQL-bestanden staan in [`migrations/`](migrations/) — zie de README daar.
-
-```bash
-sudo -u postgres psql -d goldfish -f migrations/001_progress_deleted_at.sql
-sudo -u postgres psql -d goldfish -f migrations/002_hash_verification_tokens.sql   # éénmalig!
-# ... 003 t/m 011 ...
-sudo -u postgres psql -d goldfish -f migrations/013_password_reset_and_token_revocation.sql
-```
-
-⚠️ Migratie 013 is **vereist** vóór het deployen van de bijbehorende
-backend-versie: het auth-middleware leest `users.tokens_valid_after` op elke
-request en de reset-flow schrijft naar `password_reset_tokens`.
-
-### 2. Environment
-
-Kopieer `.env.example` naar `src/.env` en vul alles in. Belangrijk in
-productie:
-
-- `HOST=127.0.0.1` — de app is dan alleen via de proxy bereikbaar.
-- `TRUST_PROXY=1` — **alleen** zetten wanneer de app achter Caddy zit.
-  Zonder proxy weglaten: de app vertrouwt `X-Forwarded-For` dan niet, zodat
-  de rate limiter op `/auth` niet met een verzonnen header te omzeilen is.
-- `APP_URL=https://<jouw-domein>` — verificatie- en wachtwoord-reset-links
-  in e-mails wijzen anders naar het verkeerde adres.
-- `JWT_SECRET` — lang en willekeurig; staat nooit in de code.
-
-### 3. Caddy
-
-Zet de `Caddyfile` uit deze repo op zijn plek (meestal `/etc/caddy/Caddyfile`)
-en geef het caddy-proces de variabele `GOLDFISH_DOMAIN=<jouw-domein>` mee
-(bij systemd: `Environment=GOLDFISH_DOMAIN=...` in een drop-in, of via
-`/etc/caddy/caddy.env`). Caddy haalt en vernieuwt het certificaat zelf.
-
-- WebSockets (`/ws`) worden automatisch geproxy'd; geen extra config nodig.
-- Access logging staat standaard uit. Het `log`-blok in de Caddyfile
-  redigeert de query string (`?token=...`) zodat JWT's en
-  verificatietokens nooit in access logs belanden. Gebruik je tóch een
-  eigen log-config, hou die filtering dan in stand — of log helemaal niet.
-
-### 4. App starten
+## Pre-deploy checklist
 
 ```bash
-npm install
-npm start           # of via systemd/pm2, met restart-on-failure
+npm test          # alle tests groen (vereist een lokale DB)
+npm audit         # geen bekende kwetsbaarheden
 ```
 
-De app logt requests alleen als methode + pad (zonder query string) en logt
-nooit Authorization-headers, wachtwoorden of tokens.
+**`npm audit` hoort bij elke deploy.** De dependency-lijst is bewust kort — houd dat zo, en
+voeg niets toe zonder noodzaak. Vindt `npm audit` iets:
 
-### 5. Controle
+- **patch/minor fix** (`npm audit fix`): doen, lockfile committen, tests draaien.
+- **major/breaking fix**: niet zomaar doen. Beoordeel eerst of het lek dit aanvalsoppervlak
+  raakt (veel meldingen zitten in code-paden die wij niet gebruiken) en overleg met Niels.
+
+Commit **altijd** de `package-lock.json` — de server installeert met `npm ci`, dus alles wat
+niet in de lockfile staat, komt er niet op.
+
+## Deployen
+
+De server **pullt zelf van GitHub**; alles moet dus gecommit én gepusht zijn.
 
 ```bash
-curl https://<jouw-domein>/            # → "Goldfish API running 🐟"
-curl -I http://<jouw-domein>/          # → 308 redirect naar https
-npm test                               # integratietests (lokaal, vereist DB)
+git push origin main
+
+ssh -i ~/.ssh/ssh-key-2026-05-31-goldfish.key ubuntu@141.148.226.78
+
+cd /home/ubuntu/goldfish/goldfish-backend
+
+# 1. Welke migraties draaiden er al? Vergelijk met migrations/ en draai alleen wat ontbreekt.
+sudo -u postgres psql -d goldfish -c "SELECT version FROM schema_migrations ORDER BY version;"
+#    (001 en 002 zijn ouder dan deze tracking en staan er niet in — dat klopt.)
+
+# 2. Code ophalen
+git pull --ff-only
+
+# 3. Nieuwe migraties draaien — als postgres, want de tabellen zijn van postgres
+#    en de app-rol mag geen DDL.
+sudo -u postgres psql -d goldfish -v ON_ERROR_STOP=1 -f migrations/0XX_naam.sql
+
+# 4. Dependencies (nodig zodra package-lock.json wijzigde)
+npm ci --omit=dev
+
+# 5. Herstarten
+pm2 restart goldfish-backend --update-env
+
+# 6. Controleren
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/      # → 200
+pm2 logs goldfish-backend --lines 30 --nostream                      # → geen fouten
 ```
 
-## Wat er gewijzigd is t.o.v. de vorige versie (juni 2026)
+Extern nacontroleren:
 
-- `"type": "module"` stond niet in `package.json`, waardoor de app op een
-  kale checkout niet startte; gefixt. `npm start` / `npm run dev` toegevoegd.
-- App bindt op `HOST` (default `0.0.0.0`, in productie `127.0.0.1` zetten).
-- `trust proxy` aangezet (één hop) zodat rate limiting per echt client-IP
-  werkt achter de proxy i.p.v. alle gebruikers samen te tellen.
-- `helmet` security headers + JSON body-limit van 1 MB.
-- Wachtwoorden: minimaal 8 tekens afgedwongen bij registratie
-  (hashing was al argon2).
-- E-mailverificatietokens worden sha256-gehasht opgeslagen en zijn
-  gegarandeerd single-use.
-- WebSocket: server-side heartbeat (dode verbindingen worden na ~60 s
-  opgeruimd), close code `4001` bij ongeldige/verlopen tokens — ook als het
-  token tijdens een open verbinding verloopt. Onparseerbare berichten worden
-  genegeerd.
-- Nieuw endpoint `DELETE /review/progress/:card_id` (zie BACKEND_API.md),
-  inclusief soft-delete die via `/sync/changes` naar andere apparaten gaat.
-- Nieuw WS-event `progress_deleted`.
-- Integratietests in `test/` (`npm test`).
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" https://api.goldfishstudy.app/version   # → 200
+curl -s -o /dev/null -w "%{http_code}\n" https://goldfishstudy.app/              # → 200
+```
 
-## Gewijzigd juli 2026 (migratie 013)
+Wijzigt de API? Werk **beide** `BACKEND_API.md`-bestanden bij (backend + frontend-repo).
 
-- **Wachtwoord-reset**: `POST /v2/auth/forgot-password` (in de app) mailt een
-  1 uur geldige, gehashte single-use reset-link; `GET/POST
-  /auth/reset-password` (buiten `/v2`, browser-flow) voert de reset uit. Een
-  geslaagde reset verifieert het e-mailadres en trekt alle JWT's in.
-- **JWT-revocatie**: `users.tokens_valid_after` als watermerk; het
-  auth-middleware en de WS-handshake weigeren oudere tokens. `POST
-  /v2/auth/logout-all` trekt alle sessies van de gebruiker in.
-- **Anti-enumeration**: registratie met een bestaand e-mailadres antwoordt
-  identiek aan een geslaagde registratie; de eigenaar krijgt een
-  "je hebt al een account"-mail.
-- **`TRUST_PROXY`** env-gestuurd (default: geen proxy vertrouwen) — voorkomt
-  rate-limit-bypass via een gespoofde `X-Forwarded-For` zolang de app
-  rechtstreeks (zonder Caddy) aan het netwerk hangt.
-- Dagelijkse purge-job veegt nu ook verlopen verificatie- en reset-tokens.
+## Environment (`src/.env`)
+
+Kopieer `.env.example`. In productie zijn deze cruciaal:
+
+- **`HOST=127.0.0.1`** — de app luistert dan alleen op loopback en is uitsluitend via nginx
+  bereikbaar. Zonder deze regel bindt hij op `0.0.0.0` (de default in `src/index.js`).
+- **`TRUST_PROXY=1`** — alleen zetten wanneer de app achter nginx staat. Zonder proxy weglaten:
+  anders kan iedereen met een verzonnen `X-Forwarded-For` de rate limiters omzeilen.
+- **`APP_URL=https://api.goldfishstudy.app`** — verificatie- en reset-links in mails wijzen
+  anders naar het verkeerde adres.
+- **`CORS_ORIGINS`** — komma-gescheiden productie-origins (nu de twee frontend-domeinen).
+  Localhost is altijd toegestaan (dev), requests zónder Origin (native apps) ook.
+- **`JWT_SECRET`** — 32 random bytes. **Roteren logt iedereen uit**; alleen na overleg.
+
+## Rollback
+
+```bash
+cd /home/ubuntu/goldfish/goldfish-backend
+git log --oneline -5
+git reset --hard <vorige-commit>
+npm ci --omit=dev
+pm2 restart goldfish-backend --update-env
+```
+
+Let op: een **migratie draait niet vanzelf terug**. De meeste hebben een `_down.sql` — die moet
+je expliciet draaien, en alleen als de nieuwe versie echt niet te redden is. Bij twijfel: eerst
+een dump maken (`sudo -u postgres /usr/local/bin/goldfish-backup.sh`).
+
+## Backups
+
+- Dagelijks 03:30 via `/etc/cron.d/goldfish-backup` → `/var/backups/goldfish` (14 dagen), plus
+  upload naar de OCI-bucket `goldfish-backups` via een **write-only** PAR-URL
+  (`/etc/goldfish-backup.env`, root-only).
+- Handmatig een backup maken: `sudo -u postgres /usr/local/bin/goldfish-backup.sh`
+- Log: `/var/log/goldfish-backup.log`. **Een mislukte off-box-upload (verlopen PAR!) logt een
+  waarschuwing maar laat de lokale backup slagen** — check dit log af en toe.
+- Terugzetten: `gunzip -c <dump>.sql.gz | sudo -u postgres psql -d <db>`. Test een restore
+  altijd eerst in een aparte database, nooit rechtstreeks over `goldfish` heen.
+
+## Security
+
+De maatregelen en hun status staan in [SECURITY_PLAN.md](SECURITY_PLAN.md). Kort:
+
+- Rate limiters staan centraal in `src/middleware/limiters.js`; elke hit wordt gelogd.
+- Security-events (mislukte logins, geweigerde tokens, WS-auth-fouten, limiet-hits) gaan als
+  JSON naar stderr, met tag `security` en **zonder** tokens, wachtwoorden of e-mailadressen:
+  ```bash
+  pm2 logs goldfish-backend --lines 200 --nostream | grep '"tag":"security"'
+  ```
+- De app logt requests als methode + pad, **zonder query string** (daar zit het WS-token in);
+  nginx logt om dezelfde reden met het `noquery`-formaat.

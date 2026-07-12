@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import jwt from "jsonwebtoken";
 import { pool } from "./db.js";
 import { isRevoked } from "./middleware/auth.js";
+import { securityEvent } from "./utils/securityLog.js";
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -52,12 +53,19 @@ export function createWsServer(server) {
 
   // Authenticatie kan op twee manieren:
   //   (a) token als eerste WS-bericht — voorkeur: de query string van een
-  //       WS-upgrade belandt in de Caddy-accesslogs, het bericht niet;
+  //       WS-upgrade belandt in de accesslogs van de proxy, het bericht niet;
   //   (b) token in de query string (?token=...) — het oude pad, blijft werken
   //       zolang er clients zijn die het zo sturen (zie SECURITY_PLAN 2.7).
   wss.on("connection", (socket, req) => {
     const url = new URL(req.url, "http://localhost");
     const queryToken = url.searchParams.get("token");
+
+    // De WS-upgrade komt via nginx binnen; het echte client-IP staat dus in
+    // X-Forwarded-For. Alleen voor de logging — nooit voor autorisatie.
+    socket.clientIp =
+      req.headers["x-forwarded-for"]?.split(",")[0].trim() ||
+      req.socket.remoteAddress ||
+      "unknown";
 
     if (queryToken) {
       authenticate(socket, queryToken);
@@ -68,6 +76,7 @@ export function createWsServer(server) {
     // niets bruikbaars stuurt, gaat dicht — anders houdt een anonieme client
     // gratis een socket open.
     const timer = setTimeout(() => {
+      securityEvent("ws_auth_failed", { ip: socket.clientIp, reason: "auth_timeout" });
       socket.close(CLOSE_UNAUTHORIZED, "Unauthorized");
     }, AUTH_TIMEOUT_MS);
 
@@ -95,7 +104,11 @@ export function createWsServer(server) {
       // exp in seconden; nodig om de verbinding te sluiten zodra het token
       // tijdens de sessie verloopt.
       socket.tokenExpiresAt = decoded.exp ? decoded.exp * 1000 : null;
-    } catch {
+    } catch (err) {
+      securityEvent("ws_auth_failed", {
+        ip: socket.clientIp,
+        reason: err.name === "TokenExpiredError" ? "expired" : "invalid_signature",
+      });
       socket.close(CLOSE_UNAUTHORIZED, "Unauthorized");
       return;
     }
@@ -109,6 +122,10 @@ export function createWsServer(server) {
         [userId]
       );
       if (rows.length === 0 || isRevoked(decoded, rows[0].tokens_valid_after)) {
+        securityEvent("ws_auth_failed", {
+          ip: socket.clientIp,
+          reason: rows.length === 0 ? "unknown_user" : "revoked",
+        });
         socket.close(CLOSE_UNAUTHORIZED, "Unauthorized");
         return;
       }

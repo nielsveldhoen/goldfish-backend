@@ -3,10 +3,9 @@
 // wordt in app.js vóór het decks-router gemount zodat GET /decks/public niet
 // door GET /decks/:id wordt opgeslokt.
 import express from "express";
-import rateLimit from "express-rate-limit";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
-import { inviteLimiter } from "../middleware/limiters.js";
+import { inviteLimiter, publicSearchLimiter } from "../middleware/limiters.js";
 import { broadcast, broadcastDeck } from "../ws.js";
 import { LIMITS } from "../utils/validate.js";
 import { isDeckOwnerSql, revokeShares } from "../utils/deckAccess.js";
@@ -14,16 +13,6 @@ import { isDeckOwnerSql, revokeShares } from "../utils/deckAccess.js";
 const router = express.Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Publieke discovery is de duurste read (ILIKE over alle publieke decks);
-// zelfde profiel als de auth-limiter.
-const publicSearchLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 120,
-  message: { error: "Too many attempts, try again later" },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
 
 const PUBLIC_PAGE_MAX = 50;
 

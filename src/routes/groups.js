@@ -12,10 +12,9 @@
 import crypto from "crypto";
 import express from "express";
 import argon2 from "argon2";
-import rateLimit from "express-rate-limit";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
-import { inviteLimiter } from "../middleware/limiters.js";
+import { inviteLimiter, joinLimiter } from "../middleware/limiters.js";
 import { broadcast, broadcastGroup } from "../ws.js";
 import { LIMITS, invalidString, invalidBoolean, firstError } from "../utils/validate.js";
 import { revokeShares } from "../utils/deckAccess.js";
@@ -23,16 +22,6 @@ import { revokeShares } from "../utils/deckAccess.js";
 const router = express.Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-// Join is een wachtwoord-verifiërend endpoint: zelfde brute-force-profiel als
-// de auth-limiter.
-const joinLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { error: "Too many attempts, try again later" },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
 
 // Join-code: deelbare identificatie (niet geheim). Alfabet zonder
 // verwarrende tekens (geen I/O/0/1); 8 tekens ≈ 40 bits — botsingen vangt de

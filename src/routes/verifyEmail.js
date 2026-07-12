@@ -1,7 +1,7 @@
 import express from "express";
 import crypto from "crypto";
-import rateLimit from "express-rate-limit";
 import { pool } from "../db.js";
+import { authLimiter as verifyLimiter } from "../middleware/limiters.js";
 
 // Browser-flow voor e-mailverificatie. De link uit de verificatiemail
 // (APP_URL/auth/verify-email?token=...) opent in een browser, dus deze route
@@ -18,14 +18,6 @@ const router = express.Router();
 
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
-
-const verifyLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { error: "Too many attempts, try again later" },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
 
 // Geen inline JS (helmet-CSP blokkeert dat). Inline <style> valt binnen
 // helmet's default style-src 'unsafe-inline'.

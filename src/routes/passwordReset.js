@@ -1,8 +1,8 @@
 import express from "express";
 import argon2 from "argon2";
 import crypto from "crypto";
-import rateLimit from "express-rate-limit";
 import { pool } from "../db.js";
+import { authLimiter as resetLimiter } from "../middleware/limiters.js";
 import { LIMITS } from "../utils/validate.js";
 import { isCommonPassword, COMMON_PASSWORD_ERROR } from "../utils/commonPasswords.js";
 
@@ -26,14 +26,6 @@ const router = express.Router();
 
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
-
-const resetLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { error: "Too many attempts, try again later" },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
 
 const escapeHtml = (s) =>
   String(s)

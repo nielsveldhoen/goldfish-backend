@@ -223,32 +223,53 @@ naar één schone set; na een reboot blijft het nu op 7 regels staan.
 **✅ Stap 3.6 — `JWT_SECRET`.** 64 hex-tekens = **32 random bytes**. Sterk genoeg; geen rotatie
 nodig (en rotatie logt iedereen uit).
 
-## Fase 4 — Detectie en proces
+## Fase 4 — Detectie en proces (uitgevoerd 2026-07-12)
 
-**Stap 4.1 — Security-logging.** Log zonder PII/tokens: mislukte logins per IP,
-rate-limit-hits, 401/403-aantallen, WS-auth-failures. Gestructureerde console-regels
-(pm2/journald bewaart ze) + logrotatie.
-*Acceptatie:* een mislukte login is terug te vinden met timestamp en IP, zonder wachtwoord/token.
+**✅ Stap 4.1 — Security-logging.** `src/utils/securityLog.js`: één JSON-regel per gebeurtenis
+naar stderr, met `"tag":"security"`. Gelogde events:
+`login_failed` (reden: `bad_password` / `unknown_account`), `login_blocked`,
+`token_rejected` (`missing` / `expired` / `invalid_signature` / `revoked` / `unknown_user`),
+`ws_auth_failed` (`auth_timeout` / `expired` / `invalid_signature` / `revoked` / `unknown_user`),
+`rate_limit_hit` (met limiter-naam) en `payload_too_large`.
+- **Het log lekt zelf niets:** geen tokens, wachtwoorden of e-mailadressen — alleen IP,
+  pad (zonder query string), user-id en een reden-code. Een mislukte login logt dus *niet* de
+  ingetypte identifier; anders staat het adres van elke typefout in de logs en krijgt wie het
+  log leest gratis een lijst geldige adressen. Er is een test die hierop faalt als iemand dat
+  later toch toevoegt.
+- Alle rate limiters zijn samengebracht in `src/middleware/limiters.js` (ze stonden verspreid
+  over vijf route-bestanden). Eén gedeelde handler → elke limiet-hit wordt gelogd.
+- **Logrotatie:** `pm2-logrotate` (10 MB, 14 bestanden, gecomprimeerd, dagelijks) en
+  `/etc/logrotate.d/goldfish-backup` (maandelijks, 12 maanden). De pm2-logs groeiden tot
+  dusver ongelimiteerd.
+- Zoeken: `pm2 logs goldfish-backend --lines 200 --nostream | grep '"tag":"security"'`
 
-**Stap 4.2 — Dependency-proces.** `npm audit` als pre-deploy-stap in `DEPLOY.md`; lockfile
-altijd committen; geen nieuwe dependencies zonder noodzaak (de lijst is bewust kort — zo houden).
-*Acceptatie:* gedocumenteerde check in `DEPLOY.md`.
+**✅ Stap 4.2 — Dependency-proces.** `DEPLOY.md` volledig herschreven (die beschreef nog **Caddy**
+en een verouderde flow) met een pre-deploy-checklist: `npm test` + **`npm audit`**, lockfile
+altijd committen, `npm ci` op de server, en hoe je met een audit-melding omgaat (patch = doen;
+major/breaking = eerst beoordelen of het lek dit aanvalsoppervlak raakt). De dode `Caddyfile`
+is uit de repo verwijderd.
 
-**◐ Stap 4.3 — Security-regressietests.** Grotendeels gedekt:
+**✅ Stap 4.3 — Security-regressietests.** Alle kroonjuwelen gedekt:
 (a) IDOR zonder share → `sharing.test.js`; (b) `can_edit` wel/niet → `edit-rights.test.js`;
 (c) toegang weg na revoke/unfollow/kick → `sharing.test.js` + `groups.test.js`;
 (d) verlopen/ingetrokken JWT → `auth-401.test.js` (REST) + `ws.test.js` (WS);
-(e) rate limiters + blocklist + WS-limieten → `security-hardening.test.js` (nieuw).
-**Nog open:** (f) oversized bodies → 413/400.
+(e) rate limiters + blocklist + WS-limieten → `security-hardening.test.js`;
+(f) oversized bodies → 413, kapotte JSON → 400 → `security-logging.test.js`.
+Daarvoor is in `app.js` een **globale error-handler** toegevoegd: geen enkele onafgevangen
+fout (ook geen async rejection in Express 5) bereikt de client nog als HTML/stack trace.
+Dat sluit meteen het laatste gaatje van bevinding 1.4.
 
-**Stap 4.4 — Gebruikersdata en privacy (uitgebreid door sharing).**
-Ontwerp een account-verwijderflow: wissen van users, decks, cards, progress, stats, tokens,
-tombstones — **plus** contacts, deck_shares, groups, group_members, group_decks. Denk na over
-de randgevallen die sharing introduceert: wat gebeurt er met decks die anderen volgen als de
-eigenaar zijn account wist, en met een groep waarvan de owner vertrekt?
-Documenteer waar welke persoonsgegevens staan (e-mail staat in `users` en lekt via
-`GET /contacts` naar geaccepteerde contacten — groepsresponses bevatten bewust nooit e-mail).
-*Acceptatie:* kort ontwerpdocument + datamap; implementatie in overleg met Niels.
+**◐ Stap 4.4 — Gebruikersdata en privacy.** Ontwerp + datamap staan in
+**[ACCOUNT_DELETION_PLAN.md](ACCOUNT_DELETION_PLAN.md)**, geschreven op basis van de FK-regels
+zoals ze **echt in productie staan**. Twee bevindingen die de implementatie sturen:
+- **Een kale `DELETE FROM users` faalt vandaag.** `deck_shares.owner_id`/`recipient_id`,
+  `deck_shares.deck_id`, `deck_shares.group_id` en `group_decks.deck_id` staan op `NO ACTION`.
+  De opruimvolgorde is dus niet optioneel: eerst `deck_shares` + `group_decks`, dan pas `users`.
+- **De cascade sloopt me ook andermans data.** `decks` → `cards` → `user_card_progress`
+  cascadeert, dus als een eigenaar zijn account wist, verliezen alle volgers/ontvangers dat deck
+  én hun eigen leerhistorie erop — zonder waarschuwing.
+*Nog te doen:* **beslissing Niels** over wat er met gedeelde decks en groepen gebeurt (verwijderen,
+anonimiseren of overdragen — §3 van dat document), daarna migratie + endpoint + tests.
 
 ---
 
@@ -260,16 +281,17 @@ Documenteer waar welke persoonsgegevens staan (e-mail staat in `users` en lekt v
   **De code staat nog niet op de server** (branch `security-hardening-fase-2`).
 - **Fase 3 — klaar op drie punten na** (die hieronder als ⚠️ staan). De infra-wijzigingen
   zijn al **live**: ze zitten in de serverconfig, niet in de repo, dus ze wachten niet op een deploy.
-- **Fase 4 — 4.3 grotendeels gedekt; 4.1, 4.2 en 4.4 open.**
+- **Fase 4 — klaar op de productbeslissing in 4.4 na** (wat gebeurt er met gedeelde decks bij
+  een account-verwijdering).
 
-**Wat nog moet — in volgorde:**
+**Wat nog moet:**
 
-1. **Opruimen in de OCI-console** (3.1, Niels): eventuele resterende 3000-ingress-regel in de
-   VCN Security List. Extern is 3000 dicht; dit is opruimen, geen gat.
+1. **Beslissing Niels (4.4):** gedeelde decks bij een account-delete — verwijderen (huidige
+   cascade), anonimiseren of overdragen? Zie §3 van [ACCOUNT_DELETION_PLAN.md](ACCOUNT_DELETION_PLAN.md).
+   Daarna pas bouwen.
 2. Frontend-helft van 2.7: `realtime_sync_service.dart` het JWT als auth-**bericht** laten
    sturen i.p.v. in de WS-URL. De backend accepteert beide; de nginx-log logt inmiddels geen
    query strings meer, dus het token lekt daar al niet meer in.
-3. Fase 4: 4.1 (security-logging), 4.2 (`npm audit` in DEPLOY.md), 4.4 (account-verwijderflow).
 
 **Fase 2 is gedeployd** (12 juli): `git pull` + `npm ci` (de audit-fixes zaten in de lockfile) +
 `pm2 restart`. Live geverifieerd: `RateLimit-Policy: 600;w=900` op `/v2`, blocklist weigert
