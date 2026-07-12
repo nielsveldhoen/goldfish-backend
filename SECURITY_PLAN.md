@@ -197,7 +197,7 @@ Bonusvondst tijdens de nacontrole: `/etc/iptables/rules.v4` bevatte de regelset 
 (alles ná de `REJECT` is dode code), en dat verdubbelde bij elke boot. Bestand herschreven
 naar één schone set; na een reboot blijft het nu op 7 regels staan.
 
-**◐ Stap 3.5 — Database.**
+**✅ Stap 3.5 — Database.**
 - ✅ Postgres luistert alleen op `localhost`; `pg_hba` staat alleen peer (socket) en md5 op
   127.0.0.1 toe. App-rol `goldfish` is **geen** superuser (geen createdb/createrole) en heeft
   alleen DML; alle tabellen zijn eigendom van `postgres`.
@@ -207,10 +207,18 @@ naar één schone set; na een reboot blijft het nu op 7 regels staan.
   leesbaar voor groep `ubuntu` (scp), niet voor de wereld.
 - ✅ **Testrestore gelukt**: dump teruggezet in een tijdelijke database; rij-aantallen exact
   gelijk aan live (3 users, 52 decks, 811 cards, 7 deck_shares, 17 migraties).
-- ⚠️ **Nog te doen: off-box-kopie.** Alles staat nu op dezelfde VM — dat beschermt tegen een
-  `DROP`/bug, niet tegen verlies van de machine. Gekozen richting: **Oracle Object Storage**.
-  Nodig van Niels: een bucket + een **Pre-Authenticated Request (PUT)**-URL uit de OCI-console;
-  daarna is het één regel in `goldfish-backup.sh` (de `UPLOAD_HOOK` staat er al, uitgecommentarieerd).
+- ✅ **Off-box-kopie actief.** Elke dump gaat na het dumpen naar de OCI-bucket
+  `goldfish-backups` (Object Storage, eu-amsterdam-1) via een **write-only
+  Pre-Authenticated Request**. De URL staat in `/etc/goldfish-backup.env`
+  (root:postgres, 0640) — **niet in git**. Geverifieerd dat de PAR alleen schrijven toestaat:
+  GET, LIST en DELETE geven alle drie 404. Dat is bewust: een aanvaller die deze server
+  overneemt kan de backups niet lezen én niet wissen. Terugzetten gaat via de OCI-console/CLI,
+  niet vanaf de server.
+  - Mislukt de upload (bijv. **verlopen PAR** — een PAR heeft een expiry!), dan slaagt de
+    lokale backup nog steeds en logt het script een luide waarschuwing naar
+    `/var/log/goldfish-backup.log`. Zet een reminder vóór de expiry-datum.
+  - Volume: ~95 KB/dag ≈ 35 MB/jaar; de gratis Object Storage-tier is 20 GB. Remote objecten
+    worden niet opgeruimd (write-only kan niet deleten) — dat mag, gezien de omvang.
 
 **✅ Stap 3.6 — `JWT_SECRET`.** 64 hex-tekens = **32 random bytes**. Sterk genoeg; geen rotatie
 nodig (en rotatie logt iedereen uit).
@@ -256,12 +264,16 @@ Documenteer waar welke persoonsgegevens staan (e-mail staat in `users` en lekt v
 
 **Wat nog moet — in volgorde:**
 
-1. **Beslissing Niels: off-box backup** (3.5). Bucket + PAR-URL uit de OCI-console; de
-   upload-hook staat klaar in `goldfish-backup.sh`.
-2. **Opruimen in de OCI-console** (3.1): eventuele resterende 3000-ingress-regel.
-3. Fase 2 deployen (`git pull` + `pm2 restart`) — geen migratie nodig, geen schema-wijziging.
-4. Frontend-helft van 2.7 (WS-token uit de URL).
-5. Fase 4: 4.1 (security-logging), 4.2 (`npm audit` in DEPLOY.md), 4.4 (account-verwijderflow).
+1. **Opruimen in de OCI-console** (3.1, Niels): eventuele resterende 3000-ingress-regel in de
+   VCN Security List. Extern is 3000 dicht; dit is opruimen, geen gat.
+2. Frontend-helft van 2.7: `realtime_sync_service.dart` het JWT als auth-**bericht** laten
+   sturen i.p.v. in de WS-URL. De backend accepteert beide; de nginx-log logt inmiddels geen
+   query strings meer, dus het token lekt daar al niet meer in.
+3. Fase 4: 4.1 (security-logging), 4.2 (`npm audit` in DEPLOY.md), 4.4 (account-verwijderflow).
+
+**Fase 2 is gedeployd** (12 juli): `git pull` + `npm ci` (de audit-fixes zaten in de lockfile) +
+`pm2 restart`. Live geverifieerd: `RateLimit-Policy: 600;w=900` op `/v2`, blocklist weigert
+`password123`, 401 zonder token, `npm audit` op de server schoon, geen fouten in het pm2-log.
 
 De server draait na de upgrade op: Ubuntu 24.04.4, kernel 6.17, nginx 1.24, PostgreSQL 16.14,
 Node 22.23. Alle hardening uit fase 3 is ná twee release-upgrades en een reboot opnieuw
