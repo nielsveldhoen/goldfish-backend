@@ -158,15 +158,44 @@ stond op `without-password` en is nu **`no`**. Geverifieerd: `ubuntu`-login met 
 fail2ban is bewust **niet** geïnstalleerd: de SSH-resets kwamen van volle half-open slots,
 en dat is met MaxStartups verholpen.
 
-**◐ Stap 3.4 — Patches en runtime.**
-- ✅ Node **v22** (actieve LTS); `unattended-upgrades` actief.
+**✅ Stap 3.4 — Patches en runtime.**
+- ✅ `unattended-upgrades` actief; Node **v22** (actieve LTS).
 - ✅ **pm2 startte niet bij boot** — er was geen `pm2-ubuntu.service`. `pm2 startup` +
-  `pm2 save` gedaan; na een reboot komt de backend nu vanzelf terug.
-- ⚠️ **OPEN RISICO — OS uit support.** Ubuntu **20.04.6** is sinds mei 2025 uit standaard-
-  support en **Ubuntu Pro is niet gekoppeld** (`pro status` → `attached: False`). Dus
-  `unattended-upgrades` draait wel, maar levert voor een groot deel van de pakketten niets
-  meer. Twee (beide gratis) uitwegen: Ubuntu Pro koppelen (ESM tot 2030, geen reboot) of
-  `do-release-upgrade` naar 22.04 → 24.04 (met snapshot en downtime). **Beslissing bij Niels.**
+  `pm2 save` gedaan; na een reboot komt de backend nu vanzelf terug (getest).
+- ✅ **OS-upgrade uitgevoerd: Ubuntu 20.04 → 22.04 → 24.04.4 LTS** (security-support tot
+  april 2029, dus geen ESM/Pro meer nodig). Zie het kopje hieronder — er zaten drie
+  voetangels in die bij een volgende machine weer opduiken.
+
+### OS-upgrade 20.04 → 24.04 (12 juli 2026) — wat erbij kwam kijken
+
+Blijft binnen **Always Free**: die hangt aan de *shape* (`VM.Standard.E2.1.Micro`, waarvan er
+twee gratis zijn) en Ubuntu is een Always Free-eligible image; een in-place upgrade verandert
+niets aan shape of storage. Boot-volume-snapshot vooraf is óók gratis (5 volume-backups
+inbegrepen).
+
+Vooraf: 2 GB **swap** aangemaakt (de VM heeft 952 MB RAM — een dist-upgrade OOM't daar zonder
+swap; hij is tijdens de upgrade ook echt aangesproken). Verse DB-dump + alle serverconfigs
+off-box gehaald, en Niels maakte een boot-volume-snapshot.
+
+Drie dingen die misgingen of stil fout hadden kunnen gaan:
+
+1. **NodeSource blokkeerde de upgrade.** `do-release-upgrade` faalde met
+   `pkgProblemResolver::Resolve generated breaks` — in het log: `DEBUG Foreign: nodejs`. De
+   Node uit de NodeSource-repo botst met die van Ubuntu. Oplossing: repo tijdelijk weg,
+   `nodejs` verwijderen (de app ligt er dan uit), upgraden, en Node 22 daarna opnieuw
+   installeren + `pm2 resurrect`. De `pm2`-module in `/usr/lib/node_modules` overleeft dat.
+2. **Postgres migreert NIET vanzelf mee.** De release-upgrade liet `postgresql-12` gewoon
+   staan (er was geen `postgresql`-metapakket), en bij het installeren van een nieuwe versie
+   komt er een **lege** cluster naast de oude. Zonder `pg_upgradecluster` praat de app dus
+   tegen een lege database. Gedaan: 12 → 14 (op jammy) en 14 → 16 (op noble), elke keer met
+   een rij-controle vóór/na (`users=3 cards=811`, beide keren gelijk) en de oude cluster pas
+   daarná gedropt.
+3. **De non-interactieve upgrader reboot niet zelf** — `/var/run/reboot-required` blijft staan.
+   Handmatig rebooten hoort bij de procedure.
+
+Bonusvondst tijdens de nacontrole: `/etc/iptables/rules.v4` bevatte de regelset **dubbel**
+(alles ná de `REJECT` is dode code), en dat verdubbelde bij elke boot. Bestand herschreven
+naar één schone set; na een reboot blijft het nu op 7 regels staan.
 
 **◐ Stap 3.5 — Database.**
 - ✅ Postgres luistert alleen op `localhost`; `pg_hba` staat alleen peer (socket) en md5 op
@@ -227,14 +256,16 @@ Documenteer waar welke persoonsgegevens staan (e-mail staat in `users` en lekt v
 
 **Wat nog moet — in volgorde:**
 
-1. **Beslissing Niels: OS uit support** (3.4). Ubuntu Pro koppelen (gratis, geen reboot) of
-   upgrade naar 24.04. Zolang dit open staat, krijgt de server voor veel pakketten geen
-   security-patches — dit is nu het grootste openstaande risico.
-2. **Beslissing Niels: off-box backup** (3.5). Bucket + PAR-URL uit de OCI-console.
-3. **Opruimen in de OCI-console** (3.1): eventuele resterende 3000-ingress-regel.
-4. Fase 2 deployen (`git pull` + `pm2 restart`) — geen migratie nodig, geen schema-wijziging.
-5. Frontend-helft van 2.7 (WS-token uit de URL).
-6. Fase 4: 4.1 (security-logging), 4.2 (`npm audit` in DEPLOY.md), 4.4 (account-verwijderflow).
+1. **Beslissing Niels: off-box backup** (3.5). Bucket + PAR-URL uit de OCI-console; de
+   upload-hook staat klaar in `goldfish-backup.sh`.
+2. **Opruimen in de OCI-console** (3.1): eventuele resterende 3000-ingress-regel.
+3. Fase 2 deployen (`git pull` + `pm2 restart`) — geen migratie nodig, geen schema-wijziging.
+4. Frontend-helft van 2.7 (WS-token uit de URL).
+5. Fase 4: 4.1 (security-logging), 4.2 (`npm audit` in DEPLOY.md), 4.4 (account-verwijderflow).
+
+De server draait na de upgrade op: Ubuntu 24.04.4, kernel 6.17, nginx 1.24, PostgreSQL 16.14,
+Node 22.23. Alle hardening uit fase 3 is ná twee release-upgrades en een reboot opnieuw
+geverifieerd (loopback-bind, sshd, firewall, rpcbind, noquery-log, backup-cron, pm2-bij-boot).
 
 Niet doen zonder overleg: `JWT_SECRET` roteren (logt iedereen uit), JWT-levensduur
 verkorten/refresh-tokens invoeren (grote frontend-impact), dependencies major-updaten.
