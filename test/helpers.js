@@ -62,6 +62,39 @@ export async function createContact(userIdA, userIdB, status = "accepted") {
   return result.rows[0];
 }
 
+// Actieve, geaccepteerde share (recipient heeft direct toegang). Voor tests
+// die de invite/accept-flow zelf niet onderzoeken.
+export async function createAcceptedShare(deckId, ownerId, recipientId, { canEdit = false, kind = "invited" } = {}) {
+  const result = await pool.query(
+    `INSERT INTO deck_shares (deck_id, owner_id, recipient_id, kind, accepted_at, can_edit)
+     VALUES ($1, $2, $3, $4, NOW(), $5) RETURNING *`,
+    [deckId, ownerId, recipientId, kind, canEdit]
+  );
+  return result.rows[0];
+}
+
+// Eigenaarloze (geörphande) decks vallen buiten cleanupUser (user_id NULL);
+// ruim ze per deck op.
+export async function cleanupDeck(deckId) {
+  await pool.query(`DELETE FROM deck_shares WHERE deck_id = $1`, [deckId]);
+  await pool.query(`DELETE FROM group_decks WHERE deck_id = $1`, [deckId]);
+  await pool.query(
+    `DELETE FROM user_card_progress
+     WHERE card_id IN (SELECT id FROM cards WHERE deck_id = $1)`,
+    [deckId]
+  );
+  await pool.query(`DELETE FROM cards WHERE deck_id = $1`, [deckId]);
+  await pool.query(`DELETE FROM decks WHERE id = $1`, [deckId]);
+}
+
+// Idem voor eigenaarloze (soft-deleted) groepen na een account-purge.
+export async function cleanupGroup(groupId) {
+  await pool.query(`DELETE FROM deck_shares WHERE group_id = $1`, [groupId]);
+  await pool.query(`DELETE FROM group_decks WHERE group_id = $1`, [groupId]);
+  await pool.query(`DELETE FROM group_members WHERE group_id = $1`, [groupId]);
+  await pool.query(`DELETE FROM groups WHERE id = $1`, [groupId]);
+}
+
 export async function cleanupUser(userId) {
   // Sharing/groepen eerst: deck_shares en group_decks hebben FK's zonder
   // cascade naar decks, en deck_shares.group_id verwijst naar groups.

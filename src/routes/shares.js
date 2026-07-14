@@ -163,7 +163,7 @@ router.get("/shares/received", authMiddleware, async (req, res) => {
                WHERE c.deck_id = d.id AND c.deleted_at IS NULL) AS card_count
        FROM deck_shares s
        JOIN decks d ON d.id = s.deck_id
-       JOIN users u ON u.id = s.owner_id
+       LEFT JOIN users u ON u.id = s.owner_id
        WHERE s.recipient_id = $1
          AND s.revoked_at IS NULL
          AND s.accepted_at IS NULL

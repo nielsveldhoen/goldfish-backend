@@ -433,12 +433,17 @@ describe("Deck-sharing", () => {
     assert.ok(!JSON.stringify(sent.body).includes("@"), "geen e-mail in shares/sent");
   });
 
-  test("deck-delete van de owner levert de recipient een tombstone + WS", async () => {
+  // Sinds ACCOUNT_DELETION_PLAN.md §5 verdwijnt een deck mét actieve
+  // subscribers niet meer bij een owner-delete: het wordt geörphand. De
+  // recipient houdt het dus — géén deck_deleted en géén tombstone — en ziet
+  // het in zijn delta terug met owner_username = NULL. (De kant van de
+  // ex-eigenaar staat in orphan-decks.test.js.)
+  test("deck-delete van de owner laat de recipient het deck houden (orphan)", async () => {
     const { user: owner, token: ownerToken } = await freshUser();
     const { user: friend, token: friendToken } = await freshUser();
     await createContact(owner.id, friend.id);
 
-    const deck = await createDeck(owner.id, "Straks weg");
+    const deck = await createDeck(owner.id, "Straks eigenaarloos");
     await createCard(deck.id);
     await request(app)
       .post(`/v2/decks/${deck.id}/share`)
@@ -451,21 +456,29 @@ describe("Deck-sharing", () => {
     const connFriend = await connectCollector(tokenFor(friend.id));
     const since = new Date(Date.now() - 60_000).toISOString();
 
-    await request(app)
+    const del = await request(app)
       .delete(`/v2/decks/${deck.id}`)
       .set("Authorization", `Bearer ${ownerToken}`);
+    assert.equal(del.status, 200);
+    assert.equal(del.body.orphaned, true);
 
     await sleep(200);
-    const deleted = connFriend.events.find((e) => e.type === "deck_deleted");
-    assert.ok(deleted, "recipient moet deck_deleted krijgen");
-    assert.equal(deleted.payload[0].id, deck.id);
+    const removal = connFriend.events.find(
+      (e) => e.type === "deck_deleted" || e.type === "deck_removed"
+    );
+    assert.ok(!removal, "recipient mag géén removal krijgen bij een orphan");
 
     const syncRes = await request(app)
       .get(`/v2/sync/changes?since=${encodeURIComponent(since)}`)
       .set("Authorization", `Bearer ${friendToken}`);
-    const tombstone = syncRes.body.decks.find((d) => d.id === deck.id);
-    assert.ok(tombstone, "tombstone moet in de delta zitten");
-    assert.ok(tombstone.deleted_at, "tombstone heeft deleted_at");
+    assert.ok(
+      !syncRes.body.removed_deck_ids.includes(deck.id),
+      "orphan hoort niet bij de removals van de recipient"
+    );
+    const synced = syncRes.body.decks.find((d) => d.id === deck.id);
+    assert.ok(synced, "orphan komt met de delta van de recipient mee");
+    assert.ok(!synced.deleted_at, "orphan is géén tombstone");
+    assert.equal(synced.owner_username, null, "eigenaar is verdwenen");
 
     connFriend.socket.close();
   });

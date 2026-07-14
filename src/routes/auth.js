@@ -9,6 +9,7 @@ import { authLimiter } from "../middleware/limiters.js";
 import { securityEvent, clientIp } from "../utils/securityLog.js";
 import { LIMITS } from "../utils/validate.js";
 import { isCommonPassword, COMMON_PASSWORD_ERROR } from "../utils/commonPasswords.js";
+import { ACCOUNT_DELETION_GRACE_DAYS } from "../config/retention.js";
 
 const router = express.Router();
 
@@ -23,6 +24,10 @@ const hashToken = (token) =>
 // alsnog te omzeilen via de klok. Eén keer berekend bij het opstarten, over een
 // random string zodat de hash zelf niets prijsgeeft.
 const dummyHash = argon2.hash(crypto.randomBytes(32).toString("hex"));
+
+// Wanneer de purge-job een aangevraagde verwijdering definitief maakt.
+const deletionEffectiveAt = (requestedAt) =>
+  new Date(new Date(requestedAt).getTime() + ACCOUNT_DELETION_GRACE_DAYS * 24 * 60 * 60 * 1000);
 
 // HEALTH CHECK
 router.get("/ping", (req, res) => {
@@ -232,13 +237,19 @@ router.post("/login", authLimiter, async (req, res) => {
 
     const token = generateToken(user.id);
 
+    // Staat er een verwijderaanvraag open, dan mag de eigenaar gewoon
+    // inloggen (bedenktijd): de client toont de deadline en de
+    // annuleerknop (POST /auth/me/restore).
     res.json({
       user: {
         id: user.id,
         email: user.email,
         username: user.username
       },
-      token
+      token,
+      ...(user.deletion_requested_at && {
+        deletion_pending_until: deletionEffectiveAt(user.deletion_requested_at),
+      }),
     });
 
   } catch (err) {
@@ -385,15 +396,117 @@ router.post("/logout-all", authMiddleware, async (req, res) => {
 router.get("/me", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT id, email, username FROM users WHERE id = $1",
+      "SELECT id, email, username, deletion_requested_at FROM users WHERE id = $1",
       [req.user.id]
     );
 
-    const user = result.rows[0];
+    const { deletion_requested_at, ...user } = result.rows[0];
 
-    res.json(user);
+    res.json({
+      ...user,
+      ...(deletion_requested_at && {
+        deletion_pending_until: deletionEffectiveAt(deletion_requested_at),
+      }),
+    });
 
   } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+// ========================
+// DELETE ME — account-verwijdering aanvragen (ACCOUNT_DELETION_PLAN.md §6)
+// ========================
+// Wachtwoord in de body als herbevestiging: een gestolen JWT mag geen account
+// kunnen wissen. Zet de bedenktijd-klok en trekt alle JWT's in; de purge-job
+// wist het account definitief na ACCOUNT_DELETION_GRACE_DAYS. Nogmaals
+// aanvragen reset de klok (idempotent genoeg, en onschadelijk).
+router.delete("/me", authMiddleware, authLimiter, async (req, res) => {
+  const { password } = req.body ?? {};
+
+  if (typeof password !== "string" || password.length === 0
+      || password.length > LIMITS.PASSWORD_LOGIN_MAX) {
+    return res.status(400).json({ error: "password is required" });
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT email, password_hash FROM users WHERE id = $1`,
+      [req.user.id]
+    );
+
+    const valid = await argon2
+      .verify(rows[0].password_hash, password)
+      .catch(() => false);
+
+    if (!valid) {
+      securityEvent("account_deletion_denied", {
+        ip: clientIp(req),
+        user_id: req.user.id,
+        reason: "bad_password",
+      });
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const result = await pool.query(
+      `UPDATE users
+       SET deletion_requested_at = NOW(), tokens_valid_after = NOW()
+       WHERE id = $1
+       RETURNING deletion_requested_at`,
+      [req.user.id]
+    );
+
+    securityEvent("account_deletion_requested", {
+      ip: clientIp(req),
+      user_id: req.user.id,
+    });
+
+    const effectiveAt = deletionEffectiveAt(result.rows[0].deletion_requested_at);
+
+    // Fire-and-forget: het account is op dit punt al gemarkeerd, een
+    // mail-fout mag de aanvraag niet terugdraaien.
+    mailer.sendAccountDeletionEmail(rows[0].email, effectiveAt).catch((err) =>
+      console.error("account deletion email failed:", err)
+    );
+
+    res.json({
+      message: "Account deletion scheduled",
+      deletion_pending_until: effectiveAt,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
+// ========================
+// RESTORE ME — openstaande verwijderaanvraag annuleren
+// ========================
+// Vereist een geldige (nieuwe) login — de aanvraag zelf trok alle tokens in,
+// dus wie hier komt heeft het wachtwoord opnieuw bewezen.
+router.post("/me/restore", authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE users SET deletion_requested_at = NULL
+       WHERE id = $1 AND deletion_requested_at IS NOT NULL
+       RETURNING id`,
+      [req.user.id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(409).json({ error: "no_pending_deletion" });
+    }
+
+    securityEvent("account_deletion_cancelled", {
+      ip: clientIp(req),
+      user_id: req.user.id,
+    });
+
+    res.json({ message: "Account deletion cancelled" });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Server error" });
   }
 });

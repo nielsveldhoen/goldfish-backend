@@ -269,8 +269,11 @@ zoals ze **echt in productie staan**. Twee bevindingen die de implementatie stur
 - **De cascade sloopt me ook andermans data.** `decks` → `cards` → `user_card_progress`
   cascadeert, dus als een eigenaar zijn account wist, verliezen alle volgers/ontvangers dat deck
   én hun eigen leerhistorie erop — zonder waarschuwing.
-*Nog te doen:* **beslissing Niels** over wat er met gedeelde decks en groepen gebeurt (verwijderen,
-anonimiseren of overdragen — §3 van dat document), daarna migratie + endpoint + tests.
+**Beslissing genomen (12 juli):** gedeelde decks blijven bij account- of deck-verwijdering
+eigenaarloos bestaan zolang er actieve subscribers zijn; een sweep in de purge-job ruimt
+eigenaarloze decks zonder subscribers op. Het volledige ontwerp (orphan-flow, migratie 020,
+sweep, AVG-afweging) staat uitgewerkt in dat document.
+*Nog te doen:* implementatie — migratie + endpoint + orphan-flow + sweep + tests (§8 aldaar).
 
 ---
 
@@ -282,14 +285,15 @@ anonimiseren of overdragen — §3 van dat document), daarna migratie + endpoint
   **De code staat nog niet op de server** (branch `security-hardening-fase-2`).
 - **Fase 3 — klaar op drie punten na** (die hieronder als ⚠️ staan). De infra-wijzigingen
   zijn al **live**: ze zitten in de serverconfig, niet in de repo, dus ze wachten niet op een deploy.
-- **Fase 4 — klaar op de productbeslissing in 4.4 na** (wat gebeurt er met gedeelde decks bij
-  een account-verwijdering).
+- **Fase 4 — ontwerp klaar, implementatie open.** De productbeslissing van 4.4 is genomen
+  (12 juli: gedeelde decks blijven eigenaarloos bestaan zolang er subscribers zijn); het
+  uitgewerkte ontwerp staat in [ACCOUNT_DELETION_PLAN.md](ACCOUNT_DELETION_PLAN.md).
 
 **Wat nog moet:**
 
-1. **Beslissing Niels (4.4):** gedeelde decks bij een account-delete — verwijderen (huidige
-   cascade), anonimiseren of overdragen? Zie §3 van [ACCOUNT_DELETION_PLAN.md](ACCOUNT_DELETION_PLAN.md).
-   Daarna pas bouwen.
+1. **Implementatie 4.4:** migratie 020, orphan-flow in deck-delete, `DELETE /v2/auth/me`
+   met bedenktijd, sweep in de purge-job — stappenplan in §8 van
+   [ACCOUNT_DELETION_PLAN.md](ACCOUNT_DELETION_PLAN.md).
 2. **Later, geen haast:** het query-token-pad uit `src/ws.js` verwijderen zodra
    `min_client_build` de oude builds uitsluit (2.7-sluitstuk), en vóór de PAR-expiry een
    nieuwe upload-URL zetten (3.5).

@@ -95,7 +95,7 @@ router.get("/changes", authMiddleware, async (req, res) => {
                AND (ucp.repetitions IS NULL OR ucp.repetitions = '')
            ) AS core_new_count
          FROM decks d
-         JOIN users _ou ON _ou.id = d.user_id
+         LEFT JOIN users _ou ON _ou.id = d.user_id
          LEFT JOIN LATERAL (
            SELECT bool_and(s.inactive) AS inactive, bool_or(s.can_edit) AS can_edit,
                   MAX(s.updated_at) AS last_update

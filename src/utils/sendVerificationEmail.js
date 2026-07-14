@@ -61,6 +61,33 @@ export const mailer = {
       `,
     });
   },
+
+  // Bevestiging van een verwijderaanvraag (DELETE /v2/auth/me). Binnen de
+  // bedenktijd kan de eigenaar terug door in te loggen en de verwijdering te
+  // annuleren — dat vereist het wachtwoord, dus een gestolen sessie kan er
+  // niet mee weglopen.
+  async sendAccountDeletionEmail(email, effectiveAt) {
+    const resend = new Resend(process.env.RESEND_API_KEY);
+    const datum = new Date(effectiveAt).toLocaleDateString("nl-NL", {
+      day: "numeric", month: "long", year: "numeric",
+    });
+
+    await resend.emails.send({
+      from: process.env.FROM_EMAIL,
+      to: email,
+      subject: "Je Goldfish-account wordt verwijderd",
+      html: `
+        <p>Er is zojuist gevraagd dit Goldfish-account te verwijderen. Je bent
+        op alle apparaten uitgelogd en het account wordt definitief gewist op
+        <strong>${datum}</strong>.</p>
+        <p>Was jij dit niet, of heb je spijt? Log vóór die datum opnieuw in
+        met je wachtwoord en kies "Verwijdering annuleren" — dan blijft alles
+        behouden.</p>
+        <p>Decks die je met anderen deelt en die zij actief gebruiken, blijven
+        na de verwijdering anoniem voor hen beschikbaar.</p>
+      `,
+    });
+  },
 };
 
 export const sendVerificationEmail = (email, token) =>

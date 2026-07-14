@@ -56,8 +56,9 @@ export function effectiveInactiveSql(alias, userParam) {
 
 // Extra SELECT-kolommen voor deck-reads: role, owner_username, can_edit en de
 // effectieve inactive. can_edit is het échte recht (owner of share-rij met
-// can_edit), niet langer een owner-synoniem. Vereist `JOIN users _ou ON
-// _ou.id = <alias>.user_id` in de query (via ownerJoinSql hieronder).
+// can_edit), niet langer een owner-synoniem. Vereist de owner-join (via
+// ownerJoinSql hieronder). Bij een eigenaarloos deck (user_id NULL,
+// ACCOUNT_DELETION_PLAN.md) is owner_username NULL en role 'recipient'.
 export function deckShareColumnsSql(alias, userParam) {
   return `
     CASE WHEN ${alias}.user_id = ${userParam} THEN 'owner' ELSE 'recipient' END AS role,
@@ -66,8 +67,11 @@ export function deckShareColumnsSql(alias, userParam) {
     ${effectiveInactiveSql(alias, userParam)} AS effective_inactive`;
 }
 
+// LEFT JOIN: een geörphand deck (user_id NULL) moet in élke lijst blijven
+// verschijnen — een INNER JOIN zou het stilletjes uit ieders resultaten laten
+// vallen.
 export function ownerJoinSql(alias) {
-  return `JOIN users _ou ON _ou.id = ${alias}.user_id`;
+  return `LEFT JOIN users _ou ON _ou.id = ${alias}.user_id`;
 }
 
 // Zet een deck-rij met de extra kolommen om naar de response-vorm: inactive
@@ -167,4 +171,68 @@ export async function revokeShares(client, { deckId, deckIds, recipientId, group
   }
 
   return removed.rows;
+}
+
+// Orphant decks (ACCOUNT_DELETION_PLAN.md §5): de eigenaar verdwijnt maar het
+// deck blijft bestaan voor zijn actieve subscribers. Aanroeper bepaalt WELKE
+// decks (alleen decks met ≥1 actieve geaccepteerde share horen hier); draait
+// binnen de transactie van de aanroeper.
+//
+// `ownerId` is de vertrekkende eigenaar. `withOwnerTombstone` (deck-delete
+// door een levende eigenaar): zet een synthetische, direct-gerevokete
+// share-rij voor de ex-eigenaar neer zodat /sync/changes zijn (offline)
+// apparaten het deck via removed_deck_ids laat opruimen — er is immers geen
+// deleted_at en hij heeft zelf geen share-rij. Bij een account-purge is dat
+// overbodig (alle apparaten zijn al uitgelogd) en wist de users-cascade zijn
+// progress, dus dan withOwnerTombstone = false.
+export async function orphanDecks(client, deckIds, ownerId, { withOwnerTombstone } = {}) {
+  if (deckIds.length === 0) return;
+
+  await client.query(
+    `UPDATE decks
+     SET user_id = NULL, is_public = false, updated_at = NOW()
+     WHERE id = ANY($1::uuid[])`,
+    [deckIds]
+  );
+
+  // Pending uitnodigingen revoken: niemand kan ze nog intrekken en de
+  // uitnodiger bestaat straks niet meer. (Pending = nog geen toegang, dus
+  // geen progress-cascade nodig zoals in revokeShares.)
+  await client.query(
+    `UPDATE deck_shares
+     SET revoked_at = NOW(), updated_at = NOW()
+     WHERE deck_id = ANY($1::uuid[])
+       AND revoked_at IS NULL AND accepted_at IS NULL`,
+    [deckIds]
+  );
+
+  // De share-rijen overleven de eigenaar; owner_id wordt nergens als
+  // toegangsbron gebruikt (owner-checks lopen via de deck-rij).
+  await client.query(
+    `UPDATE deck_shares SET owner_id = NULL
+     WHERE deck_id = ANY($1::uuid[]) AND owner_id = $2`,
+    [deckIds, ownerId]
+  );
+
+  if (withOwnerTombstone) {
+    // Eigen progress van de ex-eigenaar mee-softdeleten (zelfde redenering
+    // als DELETE /decks/:id: geen wees-core-stats achterlaten).
+    await client.query(
+      `UPDATE user_card_progress SET deleted_at = NOW()
+       WHERE user_id = $2 AND deleted_at IS NULL
+         AND card_id IN (SELECT id FROM cards WHERE deck_id = ANY($1::uuid[]))`,
+      [deckIds, ownerId]
+    );
+
+    // De no_self-CHECK (owner_id <> recipient_id) passeert met owner_id NULL;
+    // de directe unique index kan niet botsen omdat een eigenaar nooit een
+    // share-rij op zijn eigen deck had. ON CONFLICT toch, voor idempotentie.
+    await client.query(
+      `INSERT INTO deck_shares (deck_id, owner_id, recipient_id, kind, accepted_at, revoked_at)
+       SELECT d, NULL, $2, 'invited', NOW(), NOW() FROM unnest($1::uuid[]) AS d
+       ON CONFLICT (deck_id, recipient_id) WHERE group_id IS NULL
+       DO UPDATE SET revoked_at = NOW(), updated_at = NOW()`,
+      [deckIds, ownerId]
+    );
+  }
 }

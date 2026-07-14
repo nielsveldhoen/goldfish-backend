@@ -9,6 +9,7 @@ import {
   deckShareColumnsSql,
   ownerJoinSql,
   shapeDeckRow,
+  orphanDecks,
 } from "../utils/deckAccess.js";
 
 const router = express.Router();
@@ -228,6 +229,11 @@ router.put("/:id", authMiddleware, async (req, res) => {
 // ========================
 // DELETE DECK
 // ========================
+// Heeft het deck actieve, geaccepteerde subscribers, dan wordt het niet
+// verwijderd maar geörphand (ACCOUNT_DELETION_PLAN.md §5): user_id NULL,
+// subscribers en editors merken niets behalve owner_username = NULL. Voor de
+// ex-eigenaar verdwijnt het deck (synthetische tombstone voor zijn sync).
+// Zonder subscribers: het vertrouwde soft-delete-pad.
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
 
@@ -239,17 +245,43 @@ router.delete("/:id", authMiddleware, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    const result = await client.query(
-      `UPDATE decks SET deleted_at = NOW()
+    // Rij-lock: de subscriber-telling en de orphan/delete-keuze mogen niet
+    // interleaven met een gelijktijdige follow/accept.
+    const deckRes = await client.query(
+      `SELECT id FROM decks
        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-       RETURNING id, deleted_at`,
+       FOR UPDATE`,
       [id, req.user.id]
     );
 
-    if (result.rowCount === 0) {
+    if (deckRes.rowCount === 0) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "Deck not found" });
     }
+
+    const subs = await client.query(
+      `SELECT COUNT(*)::int AS n FROM deck_shares
+       WHERE deck_id = $1 AND revoked_at IS NULL AND accepted_at IS NOT NULL`,
+      [id]
+    );
+    const subscribers = subs.rows[0].n;
+
+    if (subscribers > 0) {
+      await orphanDecks(client, [id], req.user.id, { withOwnerTombstone: true });
+      await client.query("COMMIT");
+
+      // Eigen devices ruimen het deck op; subscribers krijgen géén removal —
+      // hun eerstvolgende sync levert het deck met owner_username = NULL.
+      broadcast(req.user.id, "deck_removed", [{ id }]);
+      return res.json({ message: "Deck released", orphaned: true, subscribers });
+    }
+
+    const result = await client.query(
+      `UPDATE decks SET deleted_at = NOW()
+       WHERE id = $1
+       RETURNING id, deleted_at`,
+      [id]
+    );
 
     // Cascade: voortgangsrecords van alle kaarten in dit deck mee-softdeleten,
     // zodat ze niet als wees-records (met is_core = true) in de core-stats
@@ -268,7 +300,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
     // zien het deck zo ook meteen verdwijnen.
     broadcastDeck(id, "deck_deleted", { id, deleted_at: result.rows[0].deleted_at })
       .catch((err) => console.error("[decks] broadcast failed:", err));
-    res.json({ message: "Deck deleted" });
+    res.json({ message: "Deck deleted", orphaned: false, subscribers: 0 });
 
   } catch (err) {
     await client.query("ROLLBACK");
@@ -310,35 +342,61 @@ router.post("/bulk-delete", authMiddleware, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    const result = await client.query(
-      `UPDATE decks SET deleted_at = NOW()
+    // Zelfde splitsing als DELETE /decks/:id: decks met actieve geaccepteerde
+    // subscribers worden geörphand, de rest soft-deleted. Rij-locks tegen
+    // gelijktijdige follow/accept.
+    const targets = await client.query(
+      `SELECT id, EXISTS (
+         SELECT 1 FROM deck_shares s
+         WHERE s.deck_id = decks.id
+           AND s.revoked_at IS NULL AND s.accepted_at IS NOT NULL
+       ) AS has_subscribers
+       FROM decks
        WHERE id = ANY($1::uuid[]) AND user_id = $2 AND deleted_at IS NULL
-       RETURNING id, deleted_at`,
+       FOR UPDATE OF decks`,
       [ids, req.user.id]
     );
 
-    // Cascade: voortgangsrecords van alle kaarten in deze decks
-    // mee-softdeleten, zodat ze niet als wees-records (met is_core = true)
-    // in de core-stats blijven hangen — identiek aan DELETE /decks/:id.
-    if (result.rowCount > 0) {
+    const orphanIds = targets.rows.filter((r) => r.has_subscribers).map((r) => r.id);
+    const deleteIds = targets.rows.filter((r) => !r.has_subscribers).map((r) => r.id);
+
+    await orphanDecks(client, orphanIds, req.user.id, { withOwnerTombstone: true });
+
+    let deletedRows = [];
+    if (deleteIds.length > 0) {
+      const result = await client.query(
+        `UPDATE decks SET deleted_at = NOW()
+         WHERE id = ANY($1::uuid[])
+         RETURNING id, deleted_at`,
+        [deleteIds]
+      );
+      deletedRows = result.rows;
+
+      // Cascade: voortgangsrecords van alle kaarten in deze decks
+      // mee-softdeleten, zodat ze niet als wees-records (met is_core = true)
+      // in de core-stats blijven hangen — identiek aan DELETE /decks/:id.
       await client.query(
         `UPDATE user_card_progress SET deleted_at = NOW()
          WHERE deleted_at IS NULL
            AND card_id IN (SELECT id FROM cards WHERE deck_id = ANY($1::uuid[]))`,
-        [result.rows.map((r) => r.id)]
+        [deleteIds]
       );
     }
 
     await client.query("COMMIT");
 
     // Owner (alle devices) krijgt de hele batch in één event; recipients per
-    // deck apart — de ontvangerskring verschilt per deck.
-    broadcast(req.user.id, "deck_deleted", result.rows);
-    for (const row of result.rows) {
+    // deck apart — de ontvangerskring verschilt per deck. Geörphande decks
+    // verdwijnen bij de owner via deck_removed; hun subscribers krijgen géén
+    // removal (het deck blijft voor hen bestaan).
+    broadcast(req.user.id, "deck_deleted", deletedRows);
+    broadcast(req.user.id, "deck_removed", orphanIds.map((id) => ({ id })));
+    for (const row of deletedRows) {
       broadcastDeck(row.id, "deck_deleted", [row], { excludeUserId: req.user.id })
         .catch((err) => console.error("[decks] broadcast failed:", err));
     }
-    res.json({ deleted: result.rowCount, ids: result.rows.map((r) => r.id) });
+    const processedIds = targets.rows.map((r) => r.id);
+    res.json({ deleted: processedIds.length, ids: processedIds, orphaned_ids: orphanIds });
 
   } catch (err) {
     await client.query("ROLLBACK");

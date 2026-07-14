@@ -47,6 +47,7 @@ sudo -u postgres psql -d goldfish -f 019_deck_share_edit.sql
 | `017_groups.sql` | groepen: `groups` (join-code + argon2-join-wachtwoord, soft-delete), `group_members` (owner/member, invited/active, `can_add_decks`), `group_decks` (catalogus) + FK `deck_shares.group_id → groups`, triggers, GRANT. Vereist 016. Reverse: `017_..._down.sql` | ja, idempotent |
 | `018_share_accept.sql` | `accepted_at`-kolom op `deck_shares`: een directe share is voortaan een uitnodiging (`NULL` = pending, géén toegang); bestaande rijen worden gebackfilled naar geaccepteerd. Vereist 016. Reverse: `018_..._down.sql` | ja, idempotent |
 | `019_deck_share_edit.sql` | `can_edit`-kolom (`BOOLEAN NOT NULL DEFAULT false`) op `deck_shares`: edit-recht (volledig kaartbeheer) dat de deck-owner per persoon uitdeelt (EDIT_RIGHTS_PLAN.md). Vereist 016/018. Reverse: `019_..._down.sql` | ja, idempotent |
+| `020_orphan_decks.sql` | eigenaarloze decks + account-verwijdering (ACCOUNT_DELETION_PLAN.md): `decks.user_id`, `deck_shares.owner_id` en `groups.owner_id` worden nullable (deck/groep overleeft zijn eigenaar zolang er subscribers/share-rijen zijn) + `users.deletion_requested_at` (bedenktijd `DELETE /v2/auth/me`). **Vereist vóór deploy van de account-deletion-backend.** Reverse: `020_..._down.sql` (faalt zolang er eigenaarloze rijen bestaan) | ja, idempotent |
 
 **Minimale clientversie bijstellen** (geen migratie — gewoon DML):
 ```sql

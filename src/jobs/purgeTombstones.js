@@ -16,6 +16,21 @@ export async function purgeTombstones(retentionDays = TOMBSTONE_RETENTION_DAYS) 
   try {
     await client.query("BEGIN");
 
+    // Sweep van eigenaarloze decks (ACCOUNT_DELETION_PLAN.md §7): een orphan
+    // zonder actieve geaccepteerde subscribers wordt getombstoned en loopt
+    // daarna gewoon door deze pipeline — zo blijven de gerevokete share-rijen
+    // van de laatste ontvolger de volle retentie beschikbaar als
+    // removed_deck_ids-bron voor diens offline apparaten.
+    const orphanSweep = await client.query(
+      `UPDATE decks SET deleted_at = NOW()
+       WHERE user_id IS NULL AND deleted_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM deck_shares s
+           WHERE s.deck_id = decks.id
+             AND s.revoked_at IS NULL
+             AND s.accepted_at IS NOT NULL)`
+    );
+
     const progress = await client.query(
       `DELETE FROM user_card_progress
        WHERE deleted_at IS NOT NULL
@@ -82,6 +97,7 @@ export async function purgeTombstones(retentionDays = TOMBSTONE_RETENTION_DAYS) 
       `[purgeTombstones] purged progress=${progress.rowCount}, ` +
         `cards=${cards.rowCount}, decks=${decks.rowCount}, ` +
         `shares=${shares.rowCount}, groups=${groups.rowCount}, ` +
+        `swept orphans=${orphanSweep.rowCount}, ` +
         `expired auth tokens=${expiredAuthTokens} (retention ${days}d)`
     );
 
@@ -91,6 +107,7 @@ export async function purgeTombstones(retentionDays = TOMBSTONE_RETENTION_DAYS) 
       decks: decks.rowCount,
       shares: shares.rowCount,
       groups: groups.rowCount,
+      sweptOrphans: orphanSweep.rowCount,
       expiredAuthTokens,
     };
   } catch (err) {

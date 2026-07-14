@@ -28,6 +28,11 @@ function positiveIntFromEnv(name, def) {
 export const TOMBSTONE_RETENTION_DAYS = positiveIntFromEnv("TOMBSTONE_RETENTION_DAYS", 90);
 export const SYNC_RESYNC_HORIZON_DAYS = positiveIntFromEnv("SYNC_RESYNC_HORIZON_DAYS", 75);
 
+// Bedenktijd tussen DELETE /v2/auth/me en de definitieve account-wis door de
+// purge-job (ACCOUNT_DELETION_PLAN.md §6). Binnen dit venster kan de
+// gebruiker via inloggen + POST /v2/auth/me/restore terug.
+export const ACCOUNT_DELETION_GRACE_DAYS = positiveIntFromEnv("ACCOUNT_DELETION_GRACE_DAYS", 14);
+
 // Overlap-venster voor de delta-sync-watermerken (/sync/changes, /stats/changes,
 // /review/core). Het teruggegeven server_time (= volgende `since` van de client)
 // wordt dit aantal seconden vóór het query-moment gezet. Zo vallen writes die

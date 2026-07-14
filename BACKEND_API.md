@@ -116,9 +116,12 @@ Login met email of username.
     "email": "user@example.com",
     "username": "niels"
   },
-  "token": "eyJ..."
+  "token": "eyJ...",
+  "deletion_pending_until": "2026-07-26T00:00:00.000Z"   // alleen bij een openstaande verwijderaanvraag
 }
 ```
+
+> **`deletion_pending_until`** (alleen aanwezig bij een openstaande account-verwijdering, zie `DELETE /auth/me`): inloggen blijft tijdens de bedenktijd mogelijk. De client hoort dan een banner te tonen ("je account wordt op … gewist") met een knop naar `POST /auth/me/restore`.
 
 **Foutcodes:**
 - `400` — ontbrekende velden
@@ -217,9 +220,56 @@ Haal het profiel op van de ingelogde gebruiker.
 {
   "id": "uuid",
   "email": "user@example.com",
-  "username": "niels"
+  "username": "niels",
+  "deletion_pending_until": "2026-07-26T00:00:00.000Z"   // alleen bij een openstaande verwijderaanvraag
 }
 ```
+
+---
+
+### DELETE `/auth/me` 🔒
+Vraag verwijdering van het eigen account aan (ACCOUNT_DELETION_PLAN.md). Het **wachtwoord moet mee in de body** als herbevestiging — een gestolen JWT kan hiermee dus geen account wissen.
+
+Een geslaagde aanvraag:
+- zet de bedenktijd-klok: het account wordt **definitief gewist na 14 dagen** (`ACCOUNT_DELETION_GRACE_DAYS`),
+- **trekt alle JWT's in** (zelfde watermerk als `logout-all`) — elk apparaat is per direct uitgelogd,
+- stuurt een bevestigingsmail met de wisdatum en de herstel-instructie.
+
+Tijdens de bedenktijd kan de eigenaar gewoon opnieuw inloggen (de login-response bevat dan `deletion_pending_until`) en de aanvraag annuleren via `POST /auth/me/restore`. Nogmaals aanvragen reset de klok.
+
+**Wat er bij de definitieve wis gebeurt:** alle persoonsgegevens (e-mail, username, wachtwoord, voortgang, contacten, groepslidmaatschappen) verdwijnen. Decks **zonder** actieve volgers verdwijnen mee. Decks **mét** actieve volgers blijven **eigenaarloos** bestaan: volgers houden het deck, hun voortgang en een eventueel edit-recht; `owner_username` wordt `null` en het deck is niet langer publiek vindbaar. Groepen van de gebruiker worden opgeheven (leden krijgen `group_removed`/`deck_removed`).
+
+**Rate limit:** 20 verzoeken per 15 minuten.
+
+**Request body:**
+```json
+{ "password": "geheimwachtwoord" }
+```
+
+**Response `200`:**
+```json
+{
+  "message": "Account deletion scheduled",
+  "deletion_pending_until": "2026-07-26T00:00:00.000Z"
+}
+```
+
+**Foutcodes:**
+- `400` — wachtwoord ontbreekt
+- `401` — wachtwoord onjuist (of token al ongeldig)
+
+---
+
+### POST `/auth/me/restore` 🔒
+Annuleer een openstaande verwijderaanvraag. Vereist een geldige login van ná de aanvraag (de aanvraag zelf trok alle tokens in, dus wie hier komt heeft het wachtwoord opnieuw bewezen).
+
+**Response `200`:**
+```json
+{ "message": "Account deletion cancelled" }
+```
+
+**Foutcodes:**
+- `409` — `no_pending_deletion`: er staat geen verwijderaanvraag open
 
 ---
 
@@ -253,6 +303,8 @@ Alle decks waar de ingelogde gebruiker toegang toe heeft (eigen + gedeeld), geso
 ```
 
 > **`role` / `owner_username` / `can_edit`** (sinds de sharing-release; `can_edit` écht sinds de edit-rechten-release/migratie 019): `can_edit` is de capability-vlag waar de client zijn **kaart**-bewerk-UI en write-queue-guards op stuurt. Voor de eigenaar altijd `true`; voor een recipient `true` zodra de eigenaar hem edit-recht gaf (`PUT /decks/:id/permissions/:user_id`) — dat betekent **volledig kaartbeheer** (kaarten aanmaken/bewerken/verwijderen), maar **géén** deck-writes: `PUT/DELETE /decks/:id` blijven owner-only. Eigenaarschap-beslissingen (deck verwijderen vs. van dashboard halen, archiefvlag via deck-PUT vs. share-state, delen, catalogus) moet de client dus op `role` keyen, **niet** op `can_edit`. `owner_username` is weergave (badge "gedeeld door X").
+>
+> **Eigenaarloze decks** (sinds de account-deletion-release/migratie 020): verwijdert een eigenaar zijn deck of account terwijl anderen het actief volgen, dan blijft het deck bestaan **zonder eigenaar** — `user_id` en `owner_username` zijn dan `null`, iedereen heeft `role: "recipient"`, en bestaande `can_edit`-rechten blijven werken. Toon in dat geval "verwijderde gebruiker" als eigenaar. Niemand kan zo'n deck nog hernoemen, delen of publiek maken; een dagelijkse sweep ruimt het op zodra de laatste volger afhaakt.
 >
 > **`inactive` voor recipients:** bij een gedeeld deck bevat `inactive` de archiefvlag van de **ontvanger zelf** (gezet via `PUT /decks/:id/share-state`), niet die van de eigenaar — archiveren van een gedeeld deck raakt de eigenaar dus niet, en andersom.
 
@@ -343,13 +395,21 @@ Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie
 ---
 
 ### DELETE `/decks/:id`
-Soft-delete: zet `deleted_at` op de huidige tijd. Het deck verschijnt niet meer in normale GET-responses, maar wel in `/sync/changes`.
+Het gedrag hangt af van of het deck **actieve volgers** heeft (geaccepteerde, niet-ingetrokken shares — pending uitnodigingen tellen niet):
+
+**Zonder volgers — soft-delete:** zet `deleted_at` op de huidige tijd. Het deck verschijnt niet meer in normale GET-responses, maar wel in `/sync/changes`.
 
 **Cascade:** de voortgangsrecords van alle kaarten in dit deck worden mee-gesoftdelete (`deleted_at` gezet). Ze verschijnen daarmee in `/sync/changes` met `deleted_at != null` — behandel ze als "verwijder het lokale voortgangsrecord" (zoals bij een progress-reset). Hierdoor tellen kaarten in een verwijderd deck ook niet meer mee in de core-stats (`/review/core/summary`).
 
+**Mét volgers — orphan:** het deck wordt **niet** verwijderd maar eigenaarloos gemaakt (`user_id`/`owner_username` → `null`, `is_public` → `false`). Volgers en editors houden alles; alleen de eigen voortgang van de ex-eigenaar wordt gesoftdelete. Voor de ex-eigenaar verdwijnt het deck: zijn devices krijgen een `deck_removed`-event en zijn (offline) apparaten zien het deck in `removed_deck_ids` van `/sync/changes`. De client hoort vóór deze call te waarschuwen ("N mensen gebruiken dit deck; het blijft voor hen beschikbaar").
+
 **Response `200`:**
 ```json
-{ "message": "Deck deleted" }
+{ "message": "Deck deleted", "orphaned": false, "subscribers": 0 }
+```
+of
+```json
+{ "message": "Deck released", "orphaned": true, "subscribers": 3 }
 ```
 
 **Foutcodes:**
@@ -358,7 +418,7 @@ Soft-delete: zet `deleted_at` op de huidige tijd. Het deck verschijnt niet meer 
 ---
 
 ### POST `/decks/bulk-delete`
-Meerdere decks tegelijk soft-deleten (max **100** ids per request), in één transactie. Per deck exact dezelfde semantiek als `DELETE /decks/:id`, inclusief de cascade: de voortgangsrecords van alle kaarten in elk verwijderd deck worden mee-gesoftdelete, zodat ze via `/sync/changes` en de core-stats correct verdwijnen.
+Meerdere decks tegelijk verwijderen (max **100** ids per request), in één transactie. Per deck exact dezelfde semantiek als `DELETE /decks/:id`, inclusief de orphan-splitsing (decks met actieve volgers worden eigenaarloos i.p.v. verwijderd) en de cascade: de voortgangsrecords van alle kaarten in elk verwijderd deck worden mee-gesoftdelete, zodat ze via `/sync/changes` en de core-stats correct verdwijnen.
 
 **Idempotent en tolerant:** ids die niet bestaan, al soft-deleted zijn of van een andere gebruiker zijn worden **stilzwijgend genegeerd** (zelfde stijl als het `ids`-filter van `GET /stats/decks`). Er komt géén `404` voor individuele ids — bij een `200` mag de client de hele batch als geslaagd behandelen. Een tweede call met dezelfde ids geeft gewoon `200` met `"deleted": 0`.
 
@@ -373,12 +433,13 @@ Meerdere decks tegelijk soft-deleten (max **100** ids per request), in één tra
 ```json
 {
   "deleted": 2,
-  "ids": ["uuid", "uuid"]
+  "ids": ["uuid", "uuid"],
+  "orphaned_ids": ["uuid"]
 }
 ```
-`ids` bevat de ids die daadwerkelijk verwijderd zijn (genegeerde ids ontbreken).
+`ids` bevat de ids die daadwerkelijk verwerkt zijn (genegeerde ids ontbreken); `orphaned_ids` is de deelverzameling die eigenaarloos werd i.p.v. verwijderd. Voor de aanroeper is het effect gelijk: al deze decks zijn van zíjn dashboard verdwenen.
 
-**Realtime:** er wordt **één** `deck_deleted`-event gebroadcast met als payload een array van `{ "id": "uuid", "deleted_at": "…" }`-objecten voor alle daadwerkelijk verwijderde decks. Genegeerde ids zitten niet in de array; wordt er niets verwijderd, dan komt er geen event.
+**Realtime:** er wordt **één** `deck_deleted`-event gebroadcast met als payload een array van `{ "id": "uuid", "deleted_at": "…" }`-objecten voor alle daadwerkelijk soft-deleted decks, plus **één** `deck_removed`-event (payload `{ "id": "uuid" }`-objecten) voor de geörphande decks. Genegeerde ids zitten niet in de arrays; wordt er niets verwijderd, dan komt er geen event.
 
 **Foutcodes:**
 - `400` — `deck_ids` ontbreekt, is leeg, of bevat meer dan 100 ids
