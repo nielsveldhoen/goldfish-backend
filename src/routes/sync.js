@@ -82,7 +82,7 @@ router.get("/changes", authMiddleware, async (req, res) => {
              WHERE c.deck_id = d.id
                AND c.deleted_at IS NULL
                AND ucp.is_core = true
-               AND ucp.due_date <= CURRENT_DATE
+               AND ucp.due_date <= NOW()
            ) AS core_due_count,
            (SELECT COUNT(*) FROM cards c
               JOIN user_card_progress ucp

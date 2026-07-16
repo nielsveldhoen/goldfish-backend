@@ -27,7 +27,7 @@ router.get("/due", authMiddleware, async (req, res) => {
       JOIN user_card_progress ucp ON c.id = ucp.card_id
       JOIN decks d ON c.deck_id = d.id
       WHERE ucp.user_id = $1
-        AND ucp.due_date <= CURRENT_DATE
+        AND ucp.due_date <= NOW()
         AND ucp.deleted_at IS NULL
         AND c.deleted_at IS NULL
         AND d.deleted_at IS NULL
@@ -427,7 +427,7 @@ router.get("/decks/summary", authMiddleware, async (req, res) => {
         ${canEditDeckSql("d", "$1")} AS can_edit,
 
         COUNT(ucp.card_id) FILTER (
-          WHERE ucp.due_date <= CURRENT_DATE
+          WHERE ucp.due_date <= NOW()
         ) AS due_count,
 
         COUNT(c.id) FILTER (
@@ -442,7 +442,7 @@ router.get("/decks/summary", authMiddleware, async (req, res) => {
 
         COUNT(ucp.card_id) FILTER (
           WHERE ucp.is_core = true
-            AND ucp.due_date <= CURRENT_DATE
+            AND ucp.due_date <= NOW()
         ) AS core_due_count,
 
         COUNT(c.id) FILTER (
@@ -495,7 +495,7 @@ router.get("/core/summary", authMiddleware, async (req, res) => {
     const result = await pool.query(
       `SELECT
         COUNT(*) AS total_core_count,
-        COUNT(*) FILTER (WHERE ucp.due_date <= CURRENT_DATE) AS due_count,
+        COUNT(*) FILTER (WHERE ucp.due_date <= NOW()) AS due_count,
         ROUND(AVG(ucp.remote_score)::numeric, 2) AS avg_remote_score,
         ROUND(AVG(ucp.stable_score)::numeric, 2) AS avg_stable_score,
         ROUND(AVG(ucp.recent_score)::numeric, 2) AS avg_recent_score

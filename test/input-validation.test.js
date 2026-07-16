@@ -6,6 +6,7 @@ import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import request from "supertest";
 import app from "../src/app.js";
+import { LIMITS } from "../src/utils/validate.js";
 import {
   tokenFor,
   createUser,
@@ -178,7 +179,7 @@ describe("inputbegrenzing review/progress", () => {
     assert.equal(badDate.status, 400);
 
     const badReps = await auth(request(app).post("/v2/review/progress"), token)
-      .send({ card_id: card.id, remote_score: 3, due_date: "2026-08-01", repetitions: "x".repeat(2001) });
+      .send({ card_id: card.id, remote_score: 3, due_date: "2026-08-01", repetitions: "x".repeat(LIMITS.REPETITIONS_MAX + 1) });
     assert.equal(badReps.status, 400);
   });
 

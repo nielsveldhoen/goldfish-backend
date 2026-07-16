@@ -13,7 +13,9 @@ export const LIMITS = {
   TAG_MAX: 100,
   QUESTION_MAX: 10_000,
   ANSWER_MAX: 10_000,
-  REPETITIONS_MAX: 2000,
+  // v3-uurlogs zijn ~50% groter dan de v2-daglogs (&TT per entry, overdue in
+  // uren, extra entries bij same-day drills) — vandaar 4000 i.p.v. 2000.
+  REPETITIONS_MAX: 4000,
   // Nieuwe wachtwoorden (register + reset). Bij login geldt een ruimere
   // bovengrens zodat vóór deze limiet aangemaakte wachtwoorden blijven werken.
   PASSWORD_MAX: 128,

@@ -604,6 +604,8 @@ Meerdere kaarten tegelijk soft-deleten (max **500** ids per request), in één t
 
 De frontend berekent zelf de SRS-logica (score, volgende due_date) en stuurt het resultaat op naar de backend. De backend slaat de voortgang op en beantwoordt vragen over welke kaarten wanneer herhaald moeten worden.
 
+Sinds SRS v3 is `due_date` een **volledige ISO-8601 UTC-timestamp op een heel uur** (kolomtype `timestamptz`, migratie 021); kaarten verlopen daardoor per uur i.p.v. per dag. De vergelijking is overal `due_date <= NOW()`. Een kale `YYYY-MM-DD` van een oudere client blijft geaccepteerd en wordt gelezen als 00:00 UTC.
+
 ---
 
 ### GET `/review/due`
@@ -627,7 +629,7 @@ Kaarten die nu herhaald moeten worden (`due_date <= nu`), gesorteerd op oudste d
     "remote_score": 2,
     "stable_score": 3,
     "recent_score": 1,               // null als nog geen voortgang
-    "due_date": "2024-01-01",
+    "due_date": "2024-01-01T14:00:00.000Z",
     "repetitions": "...",
     "is_core": true,
     "progress_updated_at": "..."
@@ -724,8 +726,8 @@ Sla de voortgang op na het beantwoorden van een kaart. Ondersteunt twee modi:
   "remote_score": 2,                        // verplicht — long-term (remote) score
   "stable_score": 3,                        // optioneel, standaard 0 — short-term (stable) score
   "recent_score": 1,                        // optioneel — weggelaten = bestaande waarde blijft staan
-  "due_date": "2024-02-01",                 // verplicht — YYYY-MM-DD
-  "repetitions": "...",                     // optioneel, standaard "" — intern formaat (max 2000 tekens), backend slaat op en geeft terug zonder te interpreteren
+  "due_date": "2024-02-01T14:00:00.000Z",   // verplicht — ISO-8601 UTC-timestamp op een heel uur (kale YYYY-MM-DD van oudere clients → 00:00 UTC)
+  "repetitions": "...",                     // optioneel, standaard "" — intern formaat (max 4000 tekens), backend slaat op en geeft terug zonder te interpreteren
   "is_core": true,                          // optioneel — als weggelaten blijft de bestaande waarde behouden (eerste keer: false)
   "client_updated_at": "2024-01-01T00:00:00.000Z"  // optioneel — echo van de server-versie waarop deze write gebaseerd is (zie conflictcheck)
 }
@@ -754,7 +756,7 @@ Stuur als `client_updated_at` de **server-versie** waarop de write gebaseerd is:
   "card_id": "uuid",
   "remote_score": 2,
   "stable_score": 3,
-  "due_date": "2024-02-01",
+  "due_date": "2024-02-01T14:00:00.000Z",
   "repetitions": "...",
   "is_core": true,
   "updated_at": "2024-02-01T00:00:00.000Z",
@@ -763,7 +765,7 @@ Stuur als `client_updated_at` de **server-versie** waarop de write gebaseerd is:
 ```
 
 **Foutcodes:**
-- `400` — ontbrekende of ongeldige velden: scores moeten integers binnen de smallint-range zijn, `due_date`/`client_updated_at` geldige datums, `repetitions` max 2000 tekens, `is_core` een boolean
+- `400` — ontbrekende of ongeldige velden: scores moeten integers binnen de smallint-range zijn, `due_date`/`client_updated_at` geldige datums/timestamps, `repetitions` max 4000 tekens, `is_core` een boolean
 - `403` — kaart is niet van deze gebruiker
 - `404` — kaart niet gevonden (malformed card_id), of (modus 2) nog geen voortgangsrecord voor deze kaart
 - `409` — conflict: de server heeft een nieuwere versie
@@ -858,7 +860,7 @@ De kaart-objecten hebben exact dezelfde veldnamen als `/review/due` en `/review/
       "remote_score": 2,
       "stable_score": 3,
       "recent_score": 1,
-      "due_date": "2024-01-01",
+      "due_date": "2024-01-01T14:00:00.000Z",
       "repetitions": "...",
       "is_core": true,                  // true = in core-set, false = uit core-set
       "progress_updated_at": "..."
@@ -899,7 +901,7 @@ Overzicht van alle decks met het aantal due kaarten en nieuwe kaarten. Handig vo
     "new_count": "12",         // kaarten die nog nooit zijn beantwoord (repetitions leeg of geen record)
     "total_count": "20",       // totaal aantal kaarten in het deck
     "core_total_count": "3",   // totaal aantal core-kaarten in het deck (is_core = true, incl. nieuwe)
-    "core_due_count": "1",     // core-kaarten met due_date <= vandaag (al beoordeeld)
+    "core_due_count": "1",     // core-kaarten met due_date <= nu (al beoordeeld)
     "core_new_count": "1",     // core-kaarten die nog nieuw zijn (nooit beantwoord)
     "avg_remote_score": "2.71",   // gemiddelde remote_score van geoefende kaarten (null als geen)
     "avg_stable_score": "1.50",   // gemiddelde stable_score van geoefende kaarten (null als geen)
@@ -948,7 +950,7 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
       "owner_username": "niels",
       "can_edit": true,          // stuurt alle bewerk-guards in de client
       "core_total_count": "3",   // totaal aantal core-kaarten in het deck (is_core = true)
-      "core_due_count": "1",     // core-kaarten met due_date <= vandaag
+      "core_due_count": "1",     // core-kaarten met due_date <= nu
       "core_new_count": "1"      // core-kaarten die nog nooit beoordeeld zijn
     }
   ],
