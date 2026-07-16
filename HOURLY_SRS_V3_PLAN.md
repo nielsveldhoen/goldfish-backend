@@ -1,6 +1,11 @@
 # Plan: uur-granulariteit SRS — repetitielog v2 → v3
 
-Status: ontwerp goedgekeurd door Niels (2026-07-16), implementatie nog niet gestart.
+Status: **LIVE per 2026-07-16.** Fase 1–4 uitgevoerd op branch `v3-hourly-srs`
+(frontend + backend), migratie 021 op dev én productie gedraaid, backend +
+webfrontend gedeployed (md5-geverifieerd). Pre-migratie-dumps staan op de
+server (`/var/backups/goldfish/goldfish-pre-v3-*`) en op de laptop
+(`~/goldfish-backups/`). Nog open: Android-app op het toestel updaten vóór
+gebruik (oude client kan [3]-logs niet lezen) en de branch naar main mergen.
 
 ## Vastgelegde besluiten
 
