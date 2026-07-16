@@ -89,7 +89,10 @@ Bestanden: `lib/services/repetition_service_base.dart`, nieuw
      dezelfde uitkomsten houdt.
    - `computeDueDateImpl` in uren:
      - wrong F/G → +24u; wrong H/I/J → +0u (nu due);
-     - same-session recovery → +0u; new-session recovery → +24u;
+     - het eerste góede antwoord van de dag krijgt altijd ≥ 24u verlooptijd
+       (besluit Niels 2026-07-16, bewuste afwijking van v2: een herstel na een
+       fout vandaag wordt nooit dezelfde dag opnieuw gedrilld;
+       `hadWrongThisSession` heeft in v3 geen effect meer);
      - streak-gaps en `longestEver` in uren, `earned = raw − overdueUren`;
      - `historicalMastery` = longestEverUren/8760; `streakDays/365` → uren/8760;
      - retention-jump en cheat-recovery: zelfde formules, ×24;
