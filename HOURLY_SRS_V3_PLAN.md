@@ -93,12 +93,17 @@ Bestanden: `lib/services/repetition_service_base.dart`, nieuw
        (besluit Niels 2026-07-16, bewuste afwijking van v2: een herstel na een
        fout vandaag wordt nooit dezelfde dag opnieuw gedrilld;
        `hadWrongThisSession` heeft in v3 geen effect meer);
-     - een HERHAAL-goed op een al-goede dag heeft géén 24u-vloer: interval =
-       gap sinds de vorige beurt × de vermenigvuldigingsfactor (1–3), min 1u —
-       zelfde-dag herbeurten (bv. borrowed cards in 'until all correct')
-       klimmen zo 1-2-4-8u (besluit Niels 2026-07-16). Herhaal-goeds worden
-       als eigen uurentry gelogd; de dag-aggregatie leest de eerste beurt van
-       de dag, dus de scores veranderen niet mee;
+     - één interval-formule voor elk goed antwoord (besluit Niels 2026-07-16,
+       geen aparte ladder-branch): interval = langste verdiende gap tussen de
+       antwoorden (uurentries) in de huidige streak × de vermenigvuldigings-
+       factor (1–3) uit de logs, afgerond op hele uren, min 1u. Sub-dag- en
+       meerdaagse gaps liggen op dezelfde schaal, dus drillen klimt naadloos
+       1-2-4-8-16-32u-… (bij factor 2) door de daggrens heen. Een herhaal-
+       goed gebruikt de formule zónder de 24u-vloer; doordat de basis een
+       lopend maximum is kan een herbeurt het interval nooit verkorten
+       ("alleen verlengen" zit in de formule zelf). Herhaal-goeds worden als
+       eigen uurentry gelogd; de dag-aggregatie leest de eerste beurt van de
+       dag, dus de scores veranderen niet mee;
      - streak-gaps en `longestEver` in uren, `earned = raw − overdueUren`;
      - `historicalMastery` = longestEverUren/8760; `streakDays/365` → uren/8760;
      - retention-jump en cheat-recovery: zelfde formules, ×24;
