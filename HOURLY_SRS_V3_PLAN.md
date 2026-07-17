@@ -89,19 +89,28 @@ Bestanden: `lib/services/repetition_service_base.dart`, nieuw
      dezelfde uitkomsten houdt.
    - `computeDueDateImpl` in uren:
      - wrong F/G → +24u; wrong H/I/J → +0u (nu due);
-     - GEEN dag-vloer (besluit Niels 2026-07-17, vervangt de eerdere
-       24u-regel voor het eerste goede antwoord van de dag): 24u is alleen
-       nog het séédinterval wanneer er geen bewezen gap is (allereerste
-       antwoord, of een J-reset). `hadWrongThisSession` heeft in v3 geen
-       effect op de planning;
+     - GEEN 24u-regel meer, ook geen seed (besluit Niels 2026-07-17): een
+       nieuwe kaart start onderaan de ladder (1u) en klimt via de formule;
+       de <12u-overdue-regel vervangt de seed — wie pas na 6u terugkomt
+       heeft 6u bewezen, dus het schema corrigeert zichzelf. Alleen de
+       cheat-recovery houdt zijn 24u-minimum. `hadWrongThisSession` heeft
+       in v3 geen effect op de planning;
+     - een FOUT antwoord is een harde reset: due NÚ (afgerond uur), ongeacht
+       de grade ("fout is fout", besluit Niels 2026-07-17) — de grade voedt
+       alleen de difficulty-factor en de retention-fractie. Het
+       eerstvolgende goede antwoord start de ladder op 1u, of neemt de
+       retention-jump als er vóór de fout een langere gap bewezen was;
+       de grens ligt altijd op het halve uur (14:29 → +1u = 15:00,
+       14:30 → +1u = 16:00);
      - herstel na een fout (ook eerder dezelfde dag) = de retention-jump in
        uren: fractie van de bewezen pre-lapse gap per lapse-grade (F 70% …
-       J reset), min 1u — de gap komt uit de úúrentries vlak vóór de fout,
-       dus een vandaag gedrilde kaart herstelt kort (bv. 70% van 2u → 1u);
-     - overdue-uren worden genegeerd bij een ruwe gap < 12u tussen twee
-       goede antwoorden (besluit Niels 2026-07-17): wie 6u wacht op een
-       kaart die na 1u due was, bewijst 6u — vanaf 12u geldt gewoon
-       earned = raw − overdue;
+       J reset naar de 1u-ladderstart), min 1u — de gap komt uit de
+       úúrentries vlak vóór de fout, dus een vandaag gedrilde kaart herstelt
+       kort (bv. 70% van 2u → 1u); geen bewezen gap → 1u-ladderstart;
+     - overdue telt mee in de gap, gecapt op 12u (besluit Niels 2026-07-17):
+       earned = raw − max(0, overdue − 12). Wie 6u wacht op een kaart die na
+       1u due was, bewijst 6u; wie 3 dagen te laat is krijgt gepland
+       interval + 12u, niet + 72u;
      - één interval-formule voor elk goed antwoord (besluit Niels 2026-07-16,
        geen aparte ladder-branch): interval = langste verdiende gap tussen de
        antwoorden (uurentries) in de huidige streak × de vermenigvuldigings-
