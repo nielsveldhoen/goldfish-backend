@@ -89,10 +89,19 @@ Bestanden: `lib/services/repetition_service_base.dart`, nieuw
      dezelfde uitkomsten houdt.
    - `computeDueDateImpl` in uren:
      - wrong F/G → +24u; wrong H/I/J → +0u (nu due);
-     - het eerste góede antwoord van de dag krijgt altijd ≥ 24u verlooptijd
-       (besluit Niels 2026-07-16, bewuste afwijking van v2: een herstel na een
-       fout vandaag wordt nooit dezelfde dag opnieuw gedrilld;
-       `hadWrongThisSession` heeft in v3 geen effect meer);
+     - GEEN dag-vloer (besluit Niels 2026-07-17, vervangt de eerdere
+       24u-regel voor het eerste goede antwoord van de dag): 24u is alleen
+       nog het séédinterval wanneer er geen bewezen gap is (allereerste
+       antwoord, of een J-reset). `hadWrongThisSession` heeft in v3 geen
+       effect op de planning;
+     - herstel na een fout (ook eerder dezelfde dag) = de retention-jump in
+       uren: fractie van de bewezen pre-lapse gap per lapse-grade (F 70% …
+       J reset), min 1u — de gap komt uit de úúrentries vlak vóór de fout,
+       dus een vandaag gedrilde kaart herstelt kort (bv. 70% van 2u → 1u);
+     - overdue-uren worden genegeerd bij een ruwe gap < 12u tussen twee
+       goede antwoorden (besluit Niels 2026-07-17): wie 6u wacht op een
+       kaart die na 1u due was, bewijst 6u — vanaf 12u geldt gewoon
+       earned = raw − overdue;
      - één interval-formule voor elk goed antwoord (besluit Niels 2026-07-16,
        geen aparte ladder-branch): interval = langste verdiende gap tussen de
        antwoorden (uurentries) in de huidige streak × de vermenigvuldigings-
