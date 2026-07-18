@@ -221,6 +221,7 @@ Haal het profiel op van de ingelogde gebruiker.
   "id": "uuid",
   "email": "user@example.com",
   "username": "niels",
+  "entitlements": ["speech_recognition"],                // actieve pro-features (zie hoofdstuk Abonnementen); [] = geen
   "deletion_pending_until": "2026-07-26T00:00:00.000Z"   // alleen bij een openstaande verwijderaanvraag
 }
 ```
@@ -1516,6 +1517,51 @@ De toevoeger (eigen deck terugtrekken) of de group-owner haalt een deck uit de c
 
 ### POST `/groups/:id/decks/:deck_id/add`
 Actief lid voegt een catalogus-deck aan zijn **eigen dashboard** toe → `201` share-rij (`kind: "group"`). Eigen deck → `400` `{ "error": "own_deck" }`. Het deck komt daarna binnen via de normale sync; weghalen = `DELETE /decks/:id/follow`.
+
+---
+
+## Abonnementen (`/subscriptions`) 🔒
+
+Een account kan **meerdere abonnementen** tegelijk hebben (migratie 022). Elk abonnement is een periode op één **product** (`product_key`); welke features een product ontgrendelt staat in `src/config/products.js` als **entitlements**. De client checkt features altijd op entitlement, nooit op product — zo kunnen bundels later dezelfde features ontgrendelen.
+
+Huidige producten → entitlements:
+
+| `product_key` | entitlement |
+|---|---|
+| `pro_speech` | `speech_recognition` — spraakherkenning in alle talen |
+| `pro_ai_check` | `ai_answer_check` — AI-gestuurde antwoordcontrole |
+| `pro_exams` | `exam_planning` — examens inplannen + examentraining |
+
+**"Actief"** = `started_at <= nu` en (`expires_at` leeg of in de toekomst). `canceled_at` is informatief ("verlengt niet meer"): wie opzegt houdt toegang tot `expires_at`, zoals bij de app-stores.
+
+Er is **geen schrijf-endpoint** voor clients: abonnementen ontstaan server-side (nu handmatig via SQL, later via betaalprovider-webhooks).
+
+Endpoints achter een ontbrekende entitlement antwoorden met **`403`**:
+```json
+{ "error": "Subscription required", "code": "entitlement_required", "entitlement": "speech_recognition" }
+```
+De client hoort op `code == "entitlement_required"` een gerichte upgrade-prompt te tonen (géén generieke foutmelding).
+
+### GET `/subscriptions`
+Alle abonnementsrijen van de gebruiker (ook verlopen — voor "verlopen op …"-weergave) plus de actieve entitlements.
+
+**Response `200`:**
+```json
+{
+  "subscriptions": [
+    {
+      "id": "uuid",
+      "product_key": "pro_speech",
+      "started_at": "2026-07-01T00:00:00.000Z",
+      "expires_at": "2026-08-01T00:00:00.000Z",   // null = doorlopend
+      "canceled_at": null,
+      "source": "manual",                          // manual | stripe | app_store | play_store
+      "active": true
+    }
+  ],
+  "entitlements": ["speech_recognition"]
+}
+```
 
 ---
 

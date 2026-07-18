@@ -10,6 +10,7 @@ import { securityEvent, clientIp } from "../utils/securityLog.js";
 import { LIMITS } from "../utils/validate.js";
 import { isCommonPassword, COMMON_PASSWORD_ERROR } from "../utils/commonPasswords.js";
 import { ACCOUNT_DELETION_GRACE_DAYS } from "../config/retention.js";
+import { getEntitlements } from "../utils/entitlements.js";
 
 const router = express.Router();
 
@@ -395,15 +396,19 @@ router.post("/logout-all", authMiddleware, async (req, res) => {
 // ========================
 router.get("/me", authMiddleware, async (req, res) => {
   try {
-    const result = await pool.query(
-      "SELECT id, email, username, deletion_requested_at FROM users WHERE id = $1",
-      [req.user.id]
-    );
+    const [result, entitlements] = await Promise.all([
+      pool.query(
+        "SELECT id, email, username, deletion_requested_at FROM users WHERE id = $1",
+        [req.user.id]
+      ),
+      getEntitlements(req.user.id),
+    ]);
 
     const { deletion_requested_at, ...user } = result.rows[0];
 
     res.json({
       ...user,
+      entitlements: [...entitlements].sort(),
       ...(deletion_requested_at && {
         deletion_pending_until: deletionEffectiveAt(deletion_requested_at),
       }),

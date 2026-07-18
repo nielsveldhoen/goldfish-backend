@@ -24,6 +24,9 @@ sudo -u postgres psql -d goldfish -f 016_deck_sharing.sql
 sudo -u postgres psql -d goldfish -f 017_groups.sql
 sudo -u postgres psql -d goldfish -f 018_share_accept.sql
 sudo -u postgres psql -d goldfish -f 019_deck_share_edit.sql
+sudo -u postgres psql -d goldfish -f 020_orphan_decks.sql
+sudo -u postgres psql -d goldfish -f 021_due_date_timestamptz.sql
+sudo -u postgres psql -d goldfish -f 022_subscriptions.sql
 ```
 
 | Bestand | Wat | Herhaalbaar? |
@@ -48,6 +51,8 @@ sudo -u postgres psql -d goldfish -f 019_deck_share_edit.sql
 | `018_share_accept.sql` | `accepted_at`-kolom op `deck_shares`: een directe share is voortaan een uitnodiging (`NULL` = pending, géén toegang); bestaande rijen worden gebackfilled naar geaccepteerd. Vereist 016. Reverse: `018_..._down.sql` | ja, idempotent |
 | `019_deck_share_edit.sql` | `can_edit`-kolom (`BOOLEAN NOT NULL DEFAULT false`) op `deck_shares`: edit-recht (volledig kaartbeheer) dat de deck-owner per persoon uitdeelt (EDIT_RIGHTS_PLAN.md). Vereist 016/018. Reverse: `019_..._down.sql` | ja, idempotent |
 | `020_orphan_decks.sql` | eigenaarloze decks + account-verwijdering (ACCOUNT_DELETION_PLAN.md): `decks.user_id`, `deck_shares.owner_id` en `groups.owner_id` worden nullable (deck/groep overleeft zijn eigenaar zolang er subscribers/share-rijen zijn) + `users.deletion_requested_at` (bedenktijd `DELETE /v2/auth/me`). **Vereist vóór deploy van de account-deletion-backend.** Reverse: `020_..._down.sql` (faalt zolang er eigenaarloze rijen bestaan) | ja, idempotent |
+| `021_due_date_timestamptz.sql` | `user_card_progress.due_date` van `DATE` naar `TIMESTAMPTZ` (SRS v3, HOURLY_SRS_V3_PLAN.md): kaarten worden per uur due i.p.v. per dag; bestaande waarden worden 00:00 UTC. Reverse: `021_..._down.sql` | ja, idempotent (DO-block checkt kolomtype) |
+| `022_subscriptions.sql` | `subscriptions`-tabel: meerdere abonnementen per account (PRO_FEATURES_PLAN.md). `product_key` verwijst naar `src/config/products.js` (product → entitlements, geen DDL bij nieuwe producten); "actief" is berekend (periode loopt), `canceled_at` informatief; `source`/`external_ref` voorbereid op betaalproviders + `set_updated_at`-trigger + GRANT. **Vereist vóór deploy van de abonnementen-backend** (`GET /v2/auth/me` leest de tabel). Reverse: `022_..._down.sql` | ja, idempotent |
 
 **Minimale clientversie bijstellen** (geen migratie — gewoon DML):
 ```sql
