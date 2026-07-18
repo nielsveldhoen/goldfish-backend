@@ -42,6 +42,29 @@ gebruik (oude client kan [3]-logs niet lezen) en de branch naar main mergen.
    optellen + avg-scores overschrijven per dagrij). De scores zelf blijven één
    snapshot per kaart in `user_card_progress`.
 7. **Scheduler rekent in uren**, met alle huidige dag-hoeveelheden ×24 zodat het gedrag 1:1 behouden blijft. Sub-dag intervallen (bv. eerste interval < 24u) zijn latere tuning, geen onderdeel van dit plan.
+8. **cheatRecoveryMode i.p.v. nSteps-ladder (besluit Niels 2026-07-18)**: de
+   scheduler telt geen recovery-stappen meer en kent geen 24u-minimum of
+   halveringsladder. Een X plant de kaart op de bewezen basis × 1 (min 1u) en
+   zet hem in cheatRecoveryMode: elk goed antwoord krijgt opnieuw basis × 1
+   (geen groei) totdat één verdiende gap tussen opeenvolgende antwoorden sinds
+   de X (de X ankert de eerste gap, net als een fout) de basis haalt — de
+   kaart gewoon op zijn due-moment beantwoorden is dus in één stap uit de
+   modus; eerder antwoorden herplant op dezelfde basis. De base geeft hiervoor
+   `isCheat` door aan `computeDueDateImpl` (een X kwam voorheen als gewone
+   fout binnen en werd "due nu"). De SCORES behouden v2's dag-gebaseerde
+   X-resolutie (`_resolveEntries`, 2–5 schone dagen).
+9. **Recovery-bonus in de multiplier (besluit Niels 2026-07-18)**: je zit in
+   recoverymodus zolang `longestInStreak < longestEver` (geen aparte vlag).
+   In die modus wordt bij de normale vermenigvuldigingsfactor
+   (`2^(1−difficulty)`, bereik 1–2) een bonus van `2 − intrinsicDifficulty`
+   opgeteld (1 = moeilijkste kaart … 2 = makkelijkste), totaal dus 2–4, en
+   wordt het interval gecapt op `longestEver`: recovery klimt terug tót de
+   oude gap, daarna weer normale groei. Dit vervangt de oude demping
+   `historicalMastery × recoveryFactor` (longestEver/8760), die de bonus in
+   de praktijk op ~0 hield. `_longestGapEverHours` meet hiervoor op de
+   úúrentries (opeenvolgende antwoorden) i.p.v. dag-instants, zodat
+   longestEver nooit groter kan zijn dan wat één wachttijd ooit bewezen
+   heeft — anders hing een kaart onterecht permanent "in recovery".
 
 ## Waarom scores via dag-aggregatie
 
@@ -88,13 +111,12 @@ Bestanden: `lib/services/repetition_service_base.dart`, nieuw
      `_resolveEntries` (X-recovery) draait op dag-aggregaten, zodat `_recoverySteps`
      dezelfde uitkomsten houdt.
    - `computeDueDateImpl` in uren:
-     - wrong F/G → +24u; wrong H/I/J → +0u (nu due);
      - GEEN 24u-regel meer, ook geen seed (besluit Niels 2026-07-17): een
        nieuwe kaart start onderaan de ladder (1u) en klimt via de formule;
        de <12u-overdue-regel vervangt de seed — wie pas na 6u terugkomt
-       heeft 6u bewezen, dus het schema corrigeert zichzelf. Alleen de
-       cheat-recovery houdt zijn 24u-minimum. `hadWrongThisSession` heeft
-       in v3 geen effect op de planning;
+       heeft 6u bewezen, dus het schema corrigeert zichzelf. Ook de
+       cheat-recovery heeft geen 24u-minimum meer (besluit 8).
+       `hadWrongThisSession` heeft in v3 geen effect op de planning;
      - een FOUT antwoord is een harde reset: due NÚ (afgerond uur), ongeacht
        de grade ("fout is fout", besluit Niels 2026-07-17) — de grade voedt
        alleen de difficulty-factor en de retention-fractie. Het
@@ -124,8 +146,9 @@ Bestanden: `lib/services/repetition_service_base.dart`, nieuw
        dag, dus de scores veranderen niet mee;
      - streak-gaps en `longestEver` in uren, `earned = raw − overdueUren`;
      - `historicalMastery` = longestEverUren/8760; `streakDays/365` → uren/8760;
-     - retention-jump en cheat-recovery: zelfde formules, ×24;
-     - interval afronden op hele uren, minimum 24u (huidig gedrag behouden);
+     - retention-jump: zelfde formule, ×24; cheat = cheatRecoveryMode
+       (besluit 8: basis × 1, gap-gebaseerde exit, geen stappen);
+     - interval afronden op hele uren, min 1u;
      - debug-info in uren rapporteren.
    - `mergeImpl`: sleutel wordt het (UTC-dag, uur)-paar zoals opgeslagen i.p.v. dag;
      zelfde conflictregel. Tijdzone-onafhankelijk en dus deterministisch op elk device.
