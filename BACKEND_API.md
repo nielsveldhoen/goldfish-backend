@@ -1463,6 +1463,7 @@ Eén canonieke vorm voor alle kijkers; de client leidt zijn eigen rol/rechten af
   "description": null,
   "join_code": "K7NPQ2WX",
   "owner_id": "uuid",
+  "require_approval": false,
   "created_at": "…",
   "updated_at": "…",
   "members": [
@@ -1477,19 +1478,24 @@ Eén canonieke vorm voor alle kijkers; de client leidt zijn eigen rol/rechten af
 }
 ```
 
-`status`: `"active"` of `"invited"` (aanvraag wacht op acceptatie). Het join-wachtwoord(-hash) komt nooit in een response.
+`status`: `"active"`, `"invited"` (uitnodiging wacht op acceptatie door het lid) of `"pending"` (join-aanvraag wacht op goedkeuring door de owner, zie `require_approval`). Het join-wachtwoord(-hash) komt nooit in een response.
+
+`require_approval` (migratie 023): staat deze toggle aan, dan komt iedereen die via code+wachtwoord joint eerst binnen als `pending` en moet de owner goedkeuren of afwijzen. Een `pending` lid heeft **nergens** rechten (geen decks toevoegen, inviten of dashboard-adds) maar ziet wel het group-object — wie code+wachtwoord heeft kon bij toggle-uit toch al binnen. Invites blijven buiten de goedkeuring: dat is al een expliciete uitnodiging door een actief lid.
 
 ### GET `/groups`
-Alle groepen waar ik lid van ben, inclusief openstaande invites (mijn member-rij heeft dan `status: "invited"`).
+Alle groepen waar ik lid van ben, inclusief openstaande invites (mijn member-rij heeft dan `status: "invited"`) en lopende join-aanvragen (`status: "pending"`).
 
 ### POST `/groups`
-`{ "name": "…", "password": "…", "description?": "…" }` → `201` group-object. Wachtwoord min. 8 tekens. De maker wordt owner; de response bevat de gegenereerde `join_code`.
+`{ "name": "…", "password": "…", "description?": "…", "require_approval?": false }` → `201` group-object. Wachtwoord min. 8 tekens. De maker wordt owner; de response bevat de gegenereerde `join_code`.
 
 ### POST `/groups/join`
-`{ "code": "K7NPQ2WX", "password": "…" }` → `201` group-object. Onbekende code **én** fout wachtwoord geven allebei `404` `{ "error": "group_not_found" }` (geen onderscheid). Al lid → `409` `{ "error": "already_member" }`. Een openstaande invite wordt door een geslaagde join geactiveerd. **Zwaar rate-limited** (zelfde profiel als `/auth`). **Realtime:** `group_updated` naar alle leden.
+`{ "code": "K7NPQ2WX", "password": "…" }` → `201` group-object. Met `require_approval` aan wordt de joiner `pending` in plaats van `active` (de eigen member-rij in de response toont dat). Onbekende code **én** fout wachtwoord geven allebei `404` `{ "error": "group_not_found" }` (geen onderscheid). Al lid → `409` `{ "error": "already_member" }`; aanvraag loopt al → `409` `{ "error": "approval_pending" }`. Een openstaande invite wordt door een geslaagde join geactiveerd (de invite verslaat de toggle). **Zwaar rate-limited** (zelfde profiel als `/auth`). **Realtime:** `group_updated` naar alle leden.
 
 ### PUT `/groups/:id`
-Owner: `{ "name?", "description?" }` → `200` group-object. **Realtime:** `group_updated`.
+Owner: `{ "name?", "description?", "require_approval?" }` → `200` group-object. `require_approval` op `false` zetten activeert **alle** openstaande `pending`-aanvragen meteen (die hebben code+wachtwoord al bewezen). **Realtime:** `group_updated`.
+
+### POST `/groups/:id/members/:user_id/approve`
+Owner keurt een `pending` join-aanvraag goed → `200` group-object (lid wordt `active`). Geen pending-rij / geen owner → `404`. **Afwijzen** heeft geen eigen route: `DELETE /groups/:id/members/:user_id` verwijdert een pending-rij al; de aanvrager kan zijn aanvraag zelf intrekken via datzelfde endpoint met zijn eigen id. **Realtime:** `group_updated` naar alle leden (ook de aanvrager).
 
 ### PUT `/groups/:id/password`
 Owner: `{ "password": "…" }` → `200`. Wissel het wachtwoord na een kick — anders joint het ex-lid gewoon opnieuw (de join-code blijft gelijk).

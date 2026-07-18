@@ -57,7 +57,8 @@ async function fetchGroupObjects(db, groupIds) {
 
   const [groups, members, decks] = await Promise.all([
     db.query(
-      `SELECT id, name, description, join_code, owner_id, created_at, updated_at
+      `SELECT id, name, description, join_code, owner_id, require_approval,
+              created_at, updated_at
        FROM groups WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
       [groupIds]
     ),
@@ -148,12 +149,13 @@ router.get("/", authMiddleware, async (req, res) => {
 // POST /groups — groep aanmaken
 // ========================
 router.post("/", authMiddleware, async (req, res) => {
-  const { name, description, password } = req.body;
+  const { name, description, password, require_approval } = req.body;
 
   const invalid = firstError(
     invalidString(name, "name", LIMITS.TITLE_MAX, { required: true }),
     invalidString(description, "description", LIMITS.DESCRIPTION_MAX),
     invalidGroupPassword(password),
+    invalidBoolean(require_approval, "require_approval"),
   );
   if (invalid) {
     return res.status(400).json({ error: invalid });
@@ -179,10 +181,12 @@ router.post("/", authMiddleware, async (req, res) => {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const result = await client.query(
-          `INSERT INTO groups (owner_id, name, description, join_code, join_password_hash)
-           VALUES ($1, $2, $3, $4, $5)
+          `INSERT INTO groups (owner_id, name, description, join_code,
+                               join_password_hash, require_approval)
+           VALUES ($1, $2, $3, $4, $5, $6)
            RETURNING id`,
-          [req.user.id, name, description || null, generateJoinCode(), hash]
+          [req.user.id, name, description || null, generateJoinCode(), hash,
+           require_approval ?? false]
         );
         group = result.rows[0];
         break;
@@ -230,7 +234,7 @@ router.post("/join", authMiddleware, joinLimiter, async (req, res) => {
 
   try {
     const groupRes = await pool.query(
-      `SELECT id, join_password_hash FROM groups
+      `SELECT id, join_password_hash, require_approval FROM groups
        WHERE join_code = $1 AND deleted_at IS NULL`,
       [code.toUpperCase().trim()]
     );
@@ -244,20 +248,31 @@ router.post("/join", authMiddleware, joinLimiter, async (req, res) => {
 
     const groupId = groupRes.rows[0].id;
 
-    // Upsert: een openstaande invite wordt door een geslaagde join
-    // geactiveerd; een bestaand actief lid krijgt 409.
+    // Met require_approval aan komt een nieuwe joiner binnen als 'pending'
+    // (owner keurt goed via /members/:user_id/approve). Upsert: een
+    // openstaande invite wordt door een geslaagde join geactiveerd — de
+    // invite was al een expliciete uitnodiging, dus die verslaat de toggle.
+    // Een bestaand actief/pending lid krijgt 409.
     const member = await pool.query(
       `INSERT INTO group_members (group_id, user_id, role, status)
-       VALUES ($1, $2, 'member', 'active')
+       VALUES ($1, $2, 'member', $3)
        ON CONFLICT (group_id, user_id)
        DO UPDATE SET status = 'active', updated_at = NOW()
          WHERE group_members.status = 'invited'
        RETURNING *`,
-      [groupId, req.user.id]
+      [groupId, req.user.id, groupRes.rows[0].require_approval ? "pending" : "active"]
     );
 
     if (member.rowCount === 0) {
-      return res.status(409).json({ error: "already_member" });
+      const existing = await pool.query(
+        `SELECT status FROM group_members WHERE group_id = $1 AND user_id = $2`,
+        [groupId, req.user.id]
+      );
+      // 'approval_pending' apart van 'already_member' zodat de client
+      // "je aanvraag loopt al" kan tonen.
+      const error = existing.rows[0]?.status === "pending"
+        ? "approval_pending" : "already_member";
+      return res.status(409).json({ error });
     }
 
     const groupObject = await fetchGroupObject(pool, groupId);
@@ -272,11 +287,11 @@ router.post("/join", authMiddleware, joinLimiter, async (req, res) => {
 });
 
 // ========================
-// PUT /groups/:id — naam/omschrijving (owner)
+// PUT /groups/:id — naam/omschrijving/goedkeuringstoggle (owner)
 // ========================
 router.put("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params;
-  const { name, description } = req.body;
+  const { name, description, require_approval } = req.body;
 
   if (!UUID_RE.test(id)) {
     return res.status(404).json({ error: "Group not found" });
@@ -285,24 +300,45 @@ router.put("/:id", authMiddleware, async (req, res) => {
   const invalid = firstError(
     invalidString(name, "name", LIMITS.TITLE_MAX),
     invalidString(description, "description", LIMITS.DESCRIPTION_MAX),
+    invalidBoolean(require_approval, "require_approval"),
   );
   if (invalid) {
     return res.status(400).json({ error: invalid });
   }
 
+  const client = await pool.connect();
   try {
-    const result = await pool.query(
+    await client.query("BEGIN");
+
+    const result = await client.query(
       `UPDATE groups
        SET name = COALESCE($1, name),
-           description = CASE WHEN $2::text IS NOT NULL THEN $2 ELSE description END
-       WHERE id = $3 AND owner_id = $4 AND deleted_at IS NULL
+           description = CASE WHEN $2::text IS NOT NULL THEN $2 ELSE description END,
+           require_approval = COALESCE($3, require_approval)
+       WHERE id = $4 AND owner_id = $5 AND deleted_at IS NULL
        RETURNING id`,
-      [name ?? null, description !== undefined ? description : null, id, req.user.id]
+      [name ?? null, description !== undefined ? description : null,
+       require_approval ?? null, id, req.user.id]
     );
 
     if (result.rowCount === 0) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: "Group not found" });
     }
+
+    // Toggle uit → alle openstaande aanvragen meteen activeren: de owner
+    // zegt daarmee "iedereen met code+wachtwoord mag erin", en pending
+    // leden hebben code+wachtwoord al bewezen. (Anders zaten ze vast:
+    // opnieuw joinen botst op de UNIQUE.)
+    if (require_approval === false) {
+      await client.query(
+        `UPDATE group_members SET status = 'active', updated_at = NOW()
+         WHERE group_id = $1 AND status = 'pending'`,
+        [id]
+      );
+    }
+
+    await client.query("COMMIT");
 
     const groupObject = await fetchGroupObject(pool, id);
     broadcastGroup(id, "group_updated", [groupObject])
@@ -310,8 +346,11 @@ router.put("/:id", authMiddleware, async (req, res) => {
 
     res.json(groupObject);
   } catch (err) {
+    await client.query("ROLLBACK");
     console.error(err);
     res.status(500).json({ error: "Server error" });
+  } finally {
+    client.release();
   }
 });
 
@@ -542,6 +581,43 @@ router.delete("/:id/invites", authMiddleware, async (req, res) => {
     pushGroupUpdate(id);
 
     res.status(204).end();
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ========================
+// POST /groups/:id/members/:user_id/approve — join-aanvraag goedkeuren (owner)
+// ========================
+// Afwijzen heeft geen eigen route: DELETE /groups/:id/members/:user_id (kick)
+// verwijdert een pending-rij al en stuurt group_removed naar de aanvrager.
+router.post("/:id/members/:user_id/approve", authMiddleware, async (req, res) => {
+  const { id, user_id } = req.params;
+
+  if (!UUID_RE.test(id) || !UUID_RE.test(user_id)) {
+    return res.status(404).json({ error: "Member not found" });
+  }
+
+  try {
+    const result = await pool.query(
+      `UPDATE group_members m SET status = 'active', updated_at = NOW()
+       FROM groups g
+       WHERE m.group_id = $1 AND m.user_id = $2 AND m.status = 'pending'
+         AND g.id = m.group_id AND g.owner_id = $3 AND g.deleted_at IS NULL
+       RETURNING m.id`,
+      [id, user_id, req.user.id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: "Member not found" });
+    }
+
+    const groupObject = await fetchGroupObject(pool, id);
+    broadcastGroup(id, "group_updated", [groupObject])
+      .catch((err) => console.error("[groups] broadcast failed:", err));
+
+    res.json(groupObject);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });
