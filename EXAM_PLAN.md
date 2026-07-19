@@ -1,6 +1,8 @@
 # Plan: examens (exam-aware scheduling)
 
-> **Status 2026-07-19: plan, nog niet geïmplementeerd.** Vervangt de oudere
+> **Status 2026-07-19: backend geïmplementeerd** (commit d557d3a, migratie 024
+> lokaal gedraaid, 296 tests groen; nog **niet** gedeployed naar Hetzner).
+> Frontend/UI is de volgende stap. Vervangt de oudere
 > Feature-3-schets in PRO_FEATURES_PLAN.md waar ze verschillen (dit plan:
 > hive-first snapshot-sync, hard-delete, groepsexamens; migratienummer is
 > inmiddels 024, niet 023). De `readiness`-gedachte uit dat plan komt hier
