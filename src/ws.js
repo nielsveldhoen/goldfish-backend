@@ -99,7 +99,8 @@ export function createWsServer(server) {
     let userId;
     let decoded;
     try {
-      decoded = jwt.verify(token, JWT_SECRET);
+      // Zelfde algoritme-pin als middleware/auth.js.
+      decoded = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] });
       userId = decoded.userId;
       // exp in seconden; nodig om de verbinding te sluiten zodra het token
       // tijdens de sessie verloopt.

@@ -38,7 +38,9 @@ export async function authMiddleware(req, res, next) {
 
   let decoded;
   try {
-    decoded = jwt.verify(token, JWT_SECRET);
+    // Algoritme gepind: wij tekenen alleen HS256 (generateToken.js). Zonder
+    // pin accepteert jsonwebtoken elk HMAC-algoritme dat bij het secret past.
+    decoded = jwt.verify(token, JWT_SECRET, { algorithms: ["HS256"] });
   } catch (err) {
     // Onderscheid maken tussen "verlopen" en "ongeldig" helpt bij het lezen van
     // het log: het eerste is normaal gebruik, het tweede is verdacht.

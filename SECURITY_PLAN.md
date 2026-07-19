@@ -308,3 +308,24 @@ geverifieerd (loopback-bind, sshd, firewall, rpcbind, noquery-log, backup-cron, 
 
 Niet doen zonder overleg: `JWT_SECRET` roteren (logt iedereen uit), JWT-levensduur
 verkorten/refresh-tokens invoeren (grote frontend-impact), dependencies major-updaten.
+
+---
+
+## Aanvullingen audit 2026-07-19 (hele-app-review)
+
+Twee kleine code-fixes doorgevoerd:
+
+- **Timing-oracle `/auth/resend-verification` gedicht.** Het bestaand-en-onbevestigd-pad
+  wachtte op de Resend-API (honderden ms) waar het onbekende-adres-pad direct antwoordde —
+  de uniforme response-tekst was dus via de klok te omzeilen. Nu fire-and-forget met
+  `.catch()`, exact het patroon van `/auth/forgot-password`.
+- **JWT-algoritme gepind** op `HS256` in `middleware/auth.js` én `ws.js`
+  (`jwt.verify(..., { algorithms: ["HS256"] })`). Wij tekenen alleen HS256; zonder pin
+  accepteert jsonwebtoken elk HMAC-algoritme dat bij het secret past. Defense-in-depth.
+
+Open operationele punten uit die audit (server/infra, niet in de repo op te lossen):
+fase-3-hardening repliceren op de Hetzner-box (o.a. sudo-user i.p.v. root-login),
+off-box backup opzetten, `TRUST_PROXY=1` in de productie-.env verifiëren,
+`limit_conn` per IP op het nginx-API-blok (anonieme WS-sockets), Oracle-restanten
+en de rescue-dumps op de laptop opruimen, en het bestaande 2.7-sluitstuk
+(query-token-pad uit `src/ws.js` zodra `min_client_build` het toelaat).

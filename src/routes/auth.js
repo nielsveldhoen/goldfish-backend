@@ -303,7 +303,12 @@ router.post("/resend-verification", authLimiter, async (req, res) => {
       [user.id, hashToken(token), expiresAt]
     );
 
-    await sendVerificationEmail(user.email, token);
+    // Fire-and-forget, net als forgot-password: een await op de mail-API zou
+    // het bestaand-en-onbevestigd-pad honderden ms trager maken dan het
+    // onbekende-adres-pad — dan is de anti-enumeration via de klok te omzeilen.
+    mailer.sendVerificationEmail(user.email, token).catch((err) =>
+      console.error("resend verification email failed:", err)
+    );
 
     res.json({ message: "If your email exists and is unverified, a new verification email has been sent." });
 
