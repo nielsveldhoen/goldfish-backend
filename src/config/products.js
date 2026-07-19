@@ -12,14 +12,18 @@ export const ENTITLEMENTS = Object.freeze({
   SPEECH_RECOGNITION: "speech_recognition", // spraakherkenning in alle talen
   AI_ANSWER_CHECK: "ai_answer_check",       // AI-gestuurde antwoordcontrole
   EXAM_PLANNING: "exam_planning",           // examens inplannen + examentraining
+  GROUP_MANAGEMENT: "group_management",     // groepen aanmaken/beheren + catalogus
 });
 
+// Tier-opzet (EXAM_PLAN.md, besluit 2026-07-19): `pro` ontgrendelt alle
+// features zónder externe API-kosten; daarboven komen t.z.t. `pro_plus` en
+// `pro_max` voor de features mét API-kosten (spraak, AI-check) — hogere tiers
+// als superset van de lagere. De getoonde namen ("Pro+"/"Pro Max") zijn puur
+// frontend; de keys hier zijn definitief.
 export const PRODUCTS = Object.freeze({
-  pro_speech: { entitlements: [ENTITLEMENTS.SPEECH_RECOGNITION] },
-  pro_ai_check: { entitlements: [ENTITLEMENTS.AI_ANSWER_CHECK] },
-  pro_exams: { entitlements: [ENTITLEMENTS.EXAM_PLANNING] },
-  // Voorbeeld voor later — bundel die alles ontgrendelt:
-  // pro_all: { entitlements: Object.values(ENTITLEMENTS) },
+  pro: { entitlements: [ENTITLEMENTS.EXAM_PLANNING, ENTITLEMENTS.GROUP_MANAGEMENT] },
+  // pro_plus: { entitlements: [...pro, ENTITLEMENTS.SPEECH_RECOGNITION] },
+  // pro_max:  { entitlements: [...pro_plus, ENTITLEMENTS.AI_ANSWER_CHECK] },
 });
 
 // Entitlements die een lijst product_keys samen ontgrendelen. Onbekende keys

@@ -3,7 +3,7 @@ import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { broadcast } from "../ws.js";
 import { SYNC_RESYNC_HORIZON_DAYS, SYNC_WATERMARK_OVERLAP_SECONDS } from "../config/retention.js";
-import { LIMITS, invalidString, invalidBoolean, invalidScore, invalidDate, firstError } from "../utils/validate.js";
+import { LIMITS, invalidString, invalidBoolean, invalidScore, invalidDate, invalidHours, firstError } from "../utils/validate.js";
 import { canReadDeckSql, canEditDeckSql, effectiveInactiveSql, ownerJoinSql } from "../utils/deckAccess.js";
 
 const router = express.Router();
@@ -22,7 +22,7 @@ router.get("/due", authMiddleware, async (req, res) => {
     let query = `
       SELECT c.id, c.deck_id, c.question, c.answer, c.created_at, c.updated_at,
              ucp.id AS progress_id, ucp.remote_score, ucp.stable_score, ucp.recent_score,
-             ucp.due_date, ucp.repetitions, ucp.is_core, ucp.updated_at AS progress_updated_at
+             ucp.due_date, ucp.repetitions, ucp.is_core, ucp.longest_in_streak_hours, ucp.updated_at AS progress_updated_at
       FROM cards c
       JOIN user_card_progress ucp ON c.id = ucp.card_id
       JOIN decks d ON c.deck_id = d.id
@@ -109,7 +109,7 @@ router.get("/deck/:deck_id", authMiddleware, async (req, res) => {
     const result = await pool.query(
       `SELECT c.id, c.deck_id, c.question, c.answer, c.created_at, c.updated_at,
               ucp.id AS progress_id, ucp.remote_score, ucp.stable_score, ucp.recent_score,
-              ucp.due_date, ucp.repetitions, ucp.is_core, ucp.updated_at AS progress_updated_at
+              ucp.due_date, ucp.repetitions, ucp.is_core, ucp.longest_in_streak_hours, ucp.updated_at AS progress_updated_at
        FROM cards c
        JOIN decks d ON c.deck_id = d.id
        LEFT JOIN user_card_progress ucp
@@ -210,7 +210,7 @@ router.get("/progress/:card_id", authMiddleware, async (req, res) => {
       `SELECT c.id, c.deck_id, c.question, c.answer, c.created_at, c.updated_at,
               ${canReadDeckSql("d", "$1")} AS has_access,
               ucp.id AS progress_id, ucp.remote_score, ucp.stable_score, ucp.recent_score,
-              ucp.due_date, ucp.repetitions, ucp.is_core, ucp.updated_at AS progress_updated_at
+              ucp.due_date, ucp.repetitions, ucp.is_core, ucp.longest_in_streak_hours, ucp.updated_at AS progress_updated_at
        FROM cards c
        JOIN decks d ON c.deck_id = d.id
        LEFT JOIN user_card_progress ucp
@@ -244,7 +244,7 @@ router.get("/progress/:card_id", authMiddleware, async (req, res) => {
 // UPSERT PROGRESS (frontend bepaalt alles)
 // ========================
 router.post("/progress", authMiddleware, async (req, res) => {
-  const { card_id, remote_score, stable_score, recent_score, due_date, repetitions, is_core, client_updated_at } = req.body;
+  const { card_id, remote_score, stable_score, recent_score, due_date, repetitions, is_core, longest_in_streak_hours, client_updated_at } = req.body;
 
   if (!card_id) {
     return res.status(400).json({ error: "Missing fields" });
@@ -270,6 +270,7 @@ router.post("/progress", authMiddleware, async (req, res) => {
     invalidDate(due_date, "due_date"),
     invalidString(repetitions, "repetitions", LIMITS.REPETITIONS_MAX),
     invalidBoolean(is_core, "is_core"),
+    invalidHours(longest_in_streak_hours, "longest_in_streak_hours"),
     invalidDate(client_updated_at, "client_updated_at"),
   );
   if (invalid) {
@@ -331,10 +332,12 @@ router.post("/progress", authMiddleware, async (req, res) => {
     } else {
       const coreParam = is_core !== undefined ? is_core : null;
 
+      // longest_in_streak_hours: COALESCE — een oude client (veld weg) laat
+      // de bestaande waarde staan (EXAM_PLAN.md §5).
       result = await client.query(
         `INSERT INTO user_card_progress
-         (user_id, card_id, remote_score, stable_score, recent_score, due_date, repetitions, is_core)
-         VALUES ($1, $2, $3, $4, COALESCE($5::smallint, 0), $6, $7, COALESCE($8::boolean, false))
+         (user_id, card_id, remote_score, stable_score, recent_score, due_date, repetitions, is_core, longest_in_streak_hours)
+         VALUES ($1, $2, $3, $4, COALESCE($5::smallint, 0), $6, $7, COALESCE($8::boolean, false), $9)
          ON CONFLICT (user_id, card_id)
          DO UPDATE SET
            remote_score = EXCLUDED.remote_score,
@@ -343,9 +346,10 @@ router.post("/progress", authMiddleware, async (req, res) => {
            due_date = EXCLUDED.due_date,
            repetitions = EXCLUDED.repetitions,
            is_core = COALESCE($8::boolean, user_card_progress.is_core),
+           longest_in_streak_hours = COALESCE($9::integer, user_card_progress.longest_in_streak_hours),
            deleted_at = NULL
          RETURNING *`,
-        [req.user.id, card_id, remote_score, stable_score ?? 0, recent_score ?? null, due_date, repetitions || "", coreParam]
+        [req.user.id, card_id, remote_score, stable_score ?? 0, recent_score ?? null, due_date, repetitions || "", coreParam, longest_in_streak_hours ?? null]
       );
     }
 
@@ -573,7 +577,7 @@ router.get("/core", authMiddleware, async (req, res) => {
     const cardsResult = await pool.query(
       `SELECT c.id, c.deck_id, c.question, c.answer, c.created_at, c.updated_at,
               ucp.id AS progress_id, ucp.remote_score, ucp.stable_score, ucp.recent_score,
-              ucp.due_date, ucp.repetitions, ucp.is_core, ucp.updated_at AS progress_updated_at
+              ucp.due_date, ucp.repetitions, ucp.is_core, ucp.longest_in_streak_hours, ucp.updated_at AS progress_updated_at
        FROM cards c
        JOIN user_card_progress ucp ON c.id = ucp.card_id
        JOIN decks d ON c.deck_id = d.id

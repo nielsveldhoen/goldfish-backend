@@ -730,6 +730,7 @@ Sla de voortgang op na het beantwoorden van een kaart. Ondersteunt twee modi:
   "due_date": "2024-02-01T14:00:00.000Z",   // verplicht — ISO-8601 UTC-timestamp op een heel uur (kale YYYY-MM-DD van oudere clients → 00:00 UTC)
   "repetitions": "...",                     // optioneel, standaard "" — intern formaat (max 4000 tekens), backend slaat op en geeft terug zonder te interpreteren
   "is_core": true,                          // optioneel — als weggelaten blijft de bestaande waarde behouden (eerste keer: false)
+  "longest_in_streak_hours": 168,           // optioneel — langste verdiende gap (uren) in de huidige goed-streak (EXAM_PLAN.md); weggelaten = bestaande waarde blijft staan
   "client_updated_at": "2024-01-01T00:00:00.000Z"  // optioneel — echo van de server-versie waarop deze write gebaseerd is (zie conflictcheck)
 }
 ```
@@ -760,13 +761,16 @@ Stuur als `client_updated_at` de **server-versie** waarop de write gebaseerd is:
   "due_date": "2024-02-01T14:00:00.000Z",
   "repetitions": "...",
   "is_core": true,
+  "longest_in_streak_hours": 168,           // null zolang nooit aangeleverd (oude client / nooit beantwoord)
   "updated_at": "2024-02-01T00:00:00.000Z",
   "deleted_at": null
 }
 ```
 
+De backend interpreteert `longest_in_streak_hours` niet (client-owned, de v3-scheduler berekent hem); hij wordt opgeslagen voor examen-readiness ("dekt de bewezen retentie de resterende tijd tot het examen?") en komt terug in `/sync/changes` en de `/review/*`-reads.
+
 **Foutcodes:**
-- `400` — ontbrekende of ongeldige velden: scores moeten integers binnen de smallint-range zijn, `due_date`/`client_updated_at` geldige datums/timestamps, `repetitions` max 4000 tekens, `is_core` een boolean
+- `400` — ontbrekende of ongeldige velden: scores moeten integers binnen de smallint-range zijn, `due_date`/`client_updated_at` geldige datums/timestamps, `repetitions` max 4000 tekens, `is_core` een boolean, `longest_in_streak_hours` een integer 0–200000
 - `403` — kaart is niet van deze gebruiker
 - `404` — kaart niet gevonden (malformed card_id), of (modus 2) nog geen voortgangsrecord voor deze kaart
 - `409` — conflict: de server heeft een nieuwere versie
@@ -917,7 +921,7 @@ Overzicht van alle decks met het aantal due kaarten en nieuwe kaarten. Handig vo
 ## Sync (`/sync`) 🔒
 
 ### GET `/sync/changes`
-Geeft alle decks, kaarten en voortgangsrecords terug die gewijzigd zijn na `since`. Inclusief soft-deleted items (zodat de client lokaal kan verwijderen). Omvat naast eigen decks ook **met mij gedeelde decks** (zie [Delen](#delen--publieke-bibliotheek-🔒)); progress blijft strikt van de ingelogde gebruiker.
+Geeft alle decks, kaarten en voortgangsrecords terug die gewijzigd zijn na `since`. Inclusief soft-deleted items (zodat de client lokaal kan verwijderen). Omvat naast eigen decks ook **met mij gedeelde decks** (zie [Delen](#delen--publieke-bibliotheek-🔒)); progress blijft strikt van de ingelogde gebruiker. Daarnaast bevat elke delta een **`exams`-snapshot**: de volledige actuele set toegankelijke examens (zie de noot onder de response).
 
 **Query params:**
 - `since` (optioneel) — ISO 8601 timestamp, bijv. `2026-05-01T00:00:00.000Z`
@@ -976,11 +980,13 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
       "due_date": "...",
       "repetitions": "...",
       "is_core": true,
+      "longest_in_streak_hours": 168,   // null zolang nooit aangeleverd
       "updated_at": "...",
       "deleted_at": null
     }
   ],
-  "removed_deck_ids": ["uuid"]
+  "removed_deck_ids": ["uuid"],
+  "exams": [ { /* examen-object, zie hoofdstuk Examens */ } ]
 }
 ```
 
@@ -988,6 +994,8 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
 >
 > **`removed_deck_ids`:** decks waarvoor de toegang sinds `since` is **ingetrokken** (revoke door de eigenaar, zelf ontvolgd, kick uit een groep, groep opgeheven). Er is dan geen tombstone — het deck bestaat nog bij de eigenaar. De client verwijdert deck + kaarten + eigen progress lokaal. Alleen decks zonder énige resterende toegangsbron staan erin. Bij `full_resync` is dit veld irrelevant (de client herbouwt toch alles). Oudere clients mogen het veld negeren.
 
+> **`exams` is een snapshot, geen delta:** dit veld bevat bij élke aanroep de **volledige** set examens waar de gebruiker nu toegang toe heeft (eigen + van actieve groepslidmaatschappen), ongeacht `since`. De client vervangt zijn lokale examens-box integraal (set-replace). Verwijderde examens en toegangsverlies (groep verlaten/gekickt/opgeheven) hebben dus geen tombstones of removed-lijst nodig: wat er niet meer in staat, bestaat lokaal niet meer. Oudere clients mogen het veld negeren.
+>
 > **Progress-resets:** een progress-record met `deleted_at != null` betekent dat de voortgang van die kaart gereset is (via DELETE `/review/progress/:card_id`, mogelijk op een ander apparaat). Verwijder dan het lokale voortgangsrecord; de kaart telt weer als nieuw.
 
 > **Overlap-venster:** `server_time` wordt vóór de data-queries genomen en staat bewust enkele seconden (default 5, `SYNC_WATERMARK_OVERLAP_SECONDS`) in het verleden. Writes die rond het query-moment committen vallen daardoor gegarandeerd binnen het volgende delta-venster — maar rijen uit die laatste seconden kunnen dus **dubbel** geleverd worden. De client moet deltas idempotent verwerken (upsert op id); dat deed hij al.
@@ -1482,47 +1490,88 @@ Eén canonieke vorm voor alle kijkers; de client leidt zijn eigen rol/rechten af
 
 `require_approval` (migratie 023): staat deze toggle aan, dan komt iedereen die via code+wachtwoord joint eerst binnen als `pending` en moet de owner goedkeuren of afwijzen. Een `pending` lid heeft **nergens** rechten (geen decks toevoegen, inviten of dashboard-adds) maar ziet wel het group-object — wie code+wachtwoord heeft kon bij toggle-uit toch al binnen. Invites blijven buiten de goedkeuring: dat is al een expliciete uitnodiging door een actief lid.
 
+**Pro-gating (💰 = entitlement `group_management` vereist, anders `403` `entitlement_required`):** aanmaken en wijzigen is pro; **joinen, opruimen en modereren blijven vrij** zodat een verlopen abonnement nooit iemand opsluit. Vrij: alle GET's, join, invite accepteren/afwijzen, approve, kick/zelf vertrekken, groep opheffen, dashboard-add en het terugtrekken van je eigen deck uit de catalogus.
+
 ### GET `/groups`
 Alle groepen waar ik lid van ben, inclusief openstaande invites (mijn member-rij heeft dan `status: "invited"`) en lopende join-aanvragen (`status: "pending"`).
 
-### POST `/groups`
+### POST `/groups` 💰
 `{ "name": "…", "password": "…", "description?": "…", "require_approval?": false }` → `201` group-object. Wachtwoord min. 8 tekens. De maker wordt owner; de response bevat de gegenereerde `join_code`.
 
 ### POST `/groups/join`
 `{ "code": "K7NPQ2WX", "password": "…" }` → `201` group-object. Met `require_approval` aan wordt de joiner `pending` in plaats van `active` (de eigen member-rij in de response toont dat). Onbekende code **én** fout wachtwoord geven allebei `404` `{ "error": "group_not_found" }` (geen onderscheid). Al lid → `409` `{ "error": "already_member" }`; aanvraag loopt al → `409` `{ "error": "approval_pending" }`. Een openstaande invite wordt door een geslaagde join geactiveerd (de invite verslaat de toggle). **Zwaar rate-limited** (zelfde profiel als `/auth`). **Realtime:** `group_updated` naar alle leden.
 
-### PUT `/groups/:id`
+### PUT `/groups/:id` 💰
 Owner: `{ "name?", "description?", "require_approval?" }` → `200` group-object. `require_approval` op `false` zetten activeert **alle** openstaande `pending`-aanvragen meteen (die hebben code+wachtwoord al bewezen). **Realtime:** `group_updated`.
 
 ### POST `/groups/:id/members/:user_id/approve`
 Owner keurt een `pending` join-aanvraag goed → `200` group-object (lid wordt `active`). Geen pending-rij / geen owner → `404`. **Afwijzen** heeft geen eigen route: `DELETE /groups/:id/members/:user_id` verwijdert een pending-rij al; de aanvrager kan zijn aanvraag zelf intrekken via datzelfde endpoint met zijn eigen id. **Realtime:** `group_updated` naar alle leden (ook de aanvrager).
 
-### PUT `/groups/:id/password`
+### PUT `/groups/:id/password` 💰
 Owner: `{ "password": "…" }` → `200`. Wissel het wachtwoord na een kick — anders joint het ex-lid gewoon opnieuw (de join-code blijft gelijk).
 
 ### DELETE `/groups/:id`
 Owner heft de groep op → `204`. Alle groepsshares worden gerevoket (+ progress-cascade waar het de laatste toegangsbron was). **Realtime:** `group_removed` naar alle leden, `deck_removed` naar getroffen recipients.
 
-### POST `/groups/:id/invites`
+### POST `/groups/:id/invites` 💰
 Actief lid nodigt een **eigen geaccepteerd contact** uit: `{ "user_id": "uuid" }` → `201`. Geen contact → `403` `{ "error": "not_a_contact" }`; al lid/uitgenodigd → `409`. **Rate limit:** 30 per 15 minuten **per gebruiker** (gedeeld met `POST /contacts` en `POST /decks/:id/share`) → `429`. **Realtime:** `group_invite_received` naar het doelwit, `group_updated` naar de leden.
 
 ### POST `/groups/:id/invites/accept` / DELETE `/groups/:id/invites`
 De uitgenodigde accepteert (→ `200` group-object, lid wordt `active`) of wijst af (→ `204`, member-rij hard verwijderd). **Realtime:** `group_updated` resp. `group_removed` (eigen devices) + `group_updated` (leden).
 
-### PUT `/groups/:id/members/:user_id`
+### PUT `/groups/:id/members/:user_id` 💰
 Owner zet bevoegdheden: `{ "can_add_decks": false }` → `200` group-object. Niet op de owner zelf (→ `404`).
 
 ### DELETE `/groups/:id/members/:user_id`
 Owner kickt een lid, óf een lid verlaat zelf (`:user_id` = eigen id) → `204`. De owner zelf → `400` `{ "error": "owner_cannot_leave" }` (die heft de groep op). Gevolgen: de groepsshares van het lid worden gerevoket **en zijn eigen toegevoegde decks gaan mee de groep uit** (incl. revoke bij alle leden). **Realtime:** `group_removed` naar het lid, `group_updated` naar de rest, `deck_removed` waar toegang verviel. De UI hoort de owner na een kick aan het wachtwoord-wisselen te herinneren.
 
-### POST `/groups/:id/decks`
+### POST `/groups/:id/decks` 💰
 Actief lid met `can_add_decks` zet een **eigen** deck in de catalogus: `{ "deck_id": "uuid" }` → `201` group-object. Geen bevoegdheid → `403`; andermans/onbekend deck → `404`; al in de catalogus → `409`. **Realtime:** `group_updated`.
 
 ### DELETE `/groups/:id/decks/:deck_id`
-De toevoeger (eigen deck terugtrekken) of de group-owner haalt een deck uit de catalogus → `204`. Revoket de groepsshares van alle leden op dit deck. **Realtime:** `group_updated` + `deck_removed`.
+De toevoeger (eigen deck terugtrekken) of de group-owner haalt een deck uit de catalogus → `204`. Revoket de groepsshares van alle leden op dit deck. **Carve-out:** je éigen deck terugtrekken (toevoeger of deck-eigenaar) is altijd vrij; haalt de group-owner **andermans** deck weg, dan is dat catalogusbeheer en geldt 💰 (`403` `entitlement_required` zonder `group_management`). **Realtime:** `group_updated` + `deck_removed`.
 
 ### POST `/groups/:id/decks/:deck_id/add`
 Actief lid voegt een catalogus-deck aan zijn **eigen dashboard** toe → `201` share-rij (`kind: "group"`). Eigen deck → `400` `{ "error": "own_deck" }`. Het deck komt daarna binnen via de normale sync; weghalen = `DELETE /decks/:id/follow`.
+
+---
+
+## Examens (`/exams`) 🔒
+
+Een **examen** (EXAM_PLAN.md) is een benoemde deadline met een set decks: de client-side scheduler past voor kaarten uit die decks het vervalalgoritme aan richting `exam_date`. Een examen is **persoonlijk** (`group_id: null`) of hoort bij een **groep** (zichtbaar voor alle actieve leden).
+
+**Hive-first via snapshot:** examens reizen mee in `GET /sync/changes` als het veld `exams` — altijd de **volledige** actuele set, de client vervangt zijn lokale box integraal. Verwijderen is een **hard delete** (geen tombstones). Of een kaart een examenvraag is bepaalt de client zelf: `card.deck_id` ∈ `deck_ids` van een examen met toekomstige `exam_date` (meerdere examens: vroegste toekomstige datum wint).
+
+**Rechten:** lezen is gratis (ook voor free groepsleden). Schrijven (`POST`/`PUT`) vereist 💰 entitlement `exam_planning` én — voor groepsexamens — een actieve membership met role `owner` of `can_add_decks`. `DELETE` vereist **geen** entitlement (opruimen is vrij: een examen jaagt de scheduling op, ook na een verlopen abonnement moet het weg kunnen), wel het gewone schrijfrecht.
+
+### Het examen-object
+
+```json
+{
+  "id": "uuid",
+  "owner_id": "uuid",                        // maker; null na account-verwijdering (orphan, alleen bij groepsexamens)
+  "group_id": null,                          // null = persoonlijk; uuid = groepsexamen
+  "name": "Anatomie deeltoets 2",
+  "exam_date": "2026-09-14T07:00:00.000Z",   // timestamptz — mag een expliciete (UTC-)tijd dragen
+  "deck_ids": ["uuid", "uuid"],
+  "created_at": "…",
+  "updated_at": "…"
+}
+```
+
+`deck_ids` wordt per lezer gefilterd: bij een persoonlijk examen alleen decks die de lezer mag lezen, bij een groepsexamen alleen decks die nog in de groepscatalogus staan; soft-deleted decks vallen er altijd uit. Een examen "krimpt" dus vanzelf mee zonder aparte events.
+
+### GET `/exams`
+Alle toegankelijke examens (eigen + van actieve groepslidmaatschappen), gesorteerd op `exam_date` oplopend. Verlopen examens blijven staan tot ze verwijderd worden (de client negeert ze voor de scheduling).
+
+### POST `/exams` 💰
+`{ "name": "…", "exam_date": "2026-09-14T07:00:00.000Z", "group_id?": "uuid", "deck_ids?": ["uuid"] }` → `201` examen-object. Max **50** decks; dubbele ids worden gededupliceerd. Scope-regels voor `deck_ids`: persoonlijk → elk deck leesbaar voor de maker (anders `400` `deck_not_accessible`); groepsexamen → elk deck in de groepscatalogus (anders `400` `deck_not_in_group`). `group_id` van een groep waar je geen actief lid van bent → `404`; wel lid maar geen `can_add_decks`/owner → `403` `not_allowed_to_manage_exams`. **Realtime:** `exam_updated` (eigen devices resp. alle groepsleden).
+
+### PUT `/exams/:id` 💰
+`{ "name?", "exam_date?", "deck_ids?", "client_updated_at?" }` → `200` examen-object. `deck_ids` is **set-replace** (de meegestuurde lijst vervangt de hele koppeling; zelfde scope-validatie als POST). De scope zelf (`group_id`) is onveranderbaar. `client_updated_at` werkt als bij `PUT /decks/:id`: is de server nieuwer, dan `409` `{ "error": "stale_write", "current": { …examen-object… } }`. **Realtime:** `exam_updated`.
+
+### DELETE `/exams/:id`
+Hard delete → `200` `{ "success": true }`. Géén entitlement nodig (wel schrijfrecht: eigen examen, of groepsexamen als owner/`can_add_decks`-lid). **Realtime:** `exam_removed` (`{ "id": "uuid" }`).
 
 ---
 
@@ -1530,13 +1579,15 @@ Actief lid voegt een catalogus-deck aan zijn **eigen dashboard** toe → `201` s
 
 Een account kan **meerdere abonnementen** tegelijk hebben (migratie 022). Elk abonnement is een periode op één **product** (`product_key`); welke features een product ontgrendelt staat in `src/config/products.js` als **entitlements**. De client checkt features altijd op entitlement, nooit op product — zo kunnen bundels later dezelfde features ontgrendelen.
 
+**Tier-opzet** (EXAM_PLAN.md, besluit 2026-07-19): `pro` ontgrendelt alle extra features zonder externe API-kosten; daarboven komen t.z.t. `pro_plus` en `pro_max` voor de features mét API-kosten (spraak, AI-check), als superset van de lagere tiers. De getoonde namen ("Pro+"/"Pro Max") zijn puur frontend — de keys zijn definitief.
+
 Huidige producten → entitlements:
 
-| `product_key` | entitlement |
+| `product_key` | entitlements |
 |---|---|
-| `pro_speech` | `speech_recognition` — spraakherkenning in alle talen |
-| `pro_ai_check` | `ai_answer_check` — AI-gestuurde antwoordcontrole |
-| `pro_exams` | `exam_planning` — examens inplannen + examentraining |
+| `pro` | `exam_planning` — examens inplannen + examentraining; `group_management` — groepen aanmaken/beheren + catalogus |
+| `pro_plus` *(volgt)* | `pro` + `speech_recognition` — spraakherkenning in alle talen |
+| `pro_max` *(volgt)* | `pro_plus` + `ai_answer_check` — AI-gestuurde antwoordcontrole |
 
 **"Actief"** = `started_at <= nu` en (`expires_at` leeg of in de toekomst). `canceled_at` is informatief ("verlengt niet meer"): wie opzegt houdt toegang tot `expires_at`, zoals bij de app-stores.
 
@@ -1643,6 +1694,8 @@ Bulk-endpoints sturen dus **één** event met alle items in de array (geen event
 | `group_updated`   | elke groepsmutatie (join, invite, leden, bevoegdheden, catalogus, naam) — naar alle leden | volledig group-object (client upsert zijn Hive-box) |
 | `group_invite_received` | POST `/groups/:id/invites` (naar het doelwit) | volledig group-object (eigen member-rij heeft `status: "invited"`) |
 | `group_removed`   | je bent geen lid meer (kick, zelf verlaten, invite afgewezen, groep opgeheven) | `{ "id": "<group-id>" }` |
+| `exam_updated`    | POST `/exams` of PUT `/exams/:id` — eigen devices, of alle groepsleden bij een groepsexamen | volledig examen-object (client upsert zijn Hive-box) |
+| `exam_removed`    | DELETE `/exams/:id` | `{ "id": "<exam-id>" }` — wie het event mist wordt bij de volgende sync-snapshot alsnog consistent |
 
 > **Let op — gedeelde decks:** de payload van `deck_updated`/`card_*` is de kale DB-rij (eigenaar-perspectief) en bevat **geen** `role`/`can_edit`/recipient-`inactive`. Een recipient-client moet die velden bij de merge uit zijn lokale deck behouden (de sync levert ze wél volledig geshaped).
 >

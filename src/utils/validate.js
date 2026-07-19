@@ -26,6 +26,8 @@ export const LIMITS = {
   // geen reëel gebruik en corrumpeert alleen de cumulatieve tellers.
   STATS_DELTA_MAX: 10_000,
   TOTAL_CARDS_MAX: 1_000_000,
+  // longest_in_streak_hours: ~22 jaar — ruim boven elke echte streak-gap.
+  STREAK_HOURS_MAX: 200_000,
 };
 
 // Postgres smallint — scores buiten deze range geven anders een 22P02/22003.
@@ -100,6 +102,16 @@ export function invalidAvg(value, name) {
   if (typeof value !== "number" || !Number.isFinite(value)
       || value < SMALLINT_MIN || value > SMALLINT_MAX) {
     return `${name} must be a finite number`;
+  }
+  return null;
+}
+
+// Uur-tellers van de client (longest_in_streak_hours, EXAM_PLAN.md):
+// niet-negatieve integer met een sane bovengrens.
+export function invalidHours(value, name) {
+  if (value === undefined || value === null) return null;
+  if (!Number.isInteger(value) || value < 0 || value > LIMITS.STREAK_HOURS_MAX) {
+    return `${name} must be an integer between 0 and ${LIMITS.STREAK_HOURS_MAX}`;
   }
   return null;
 }

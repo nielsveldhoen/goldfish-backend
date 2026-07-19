@@ -2,6 +2,7 @@ import express from "express";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { SYNC_RESYNC_HORIZON_DAYS, SYNC_WATERMARK_OVERLAP_SECONDS } from "../config/retention.js";
+import { fetchExamObjects } from "./exams.js";
 
 const router = express.Router();
 
@@ -51,7 +52,7 @@ router.get("/changes", authMiddleware, async (req, res) => {
       [SYNC_WATERMARK_OVERLAP_SECONDS]
     );
 
-    const [decksResult, cardsResult, progressResult, removedResult] = await Promise.all([
+    const [decksResult, cardsResult, progressResult, removedResult, exams] = await Promise.all([
       // Eigen decks + decks met een actieve share-rij. Voor gedeelde decks
       // geldt een extra venster: is de shárerij nieuw/gewijzigd sinds `since`
       // (nieuw gedeeld, her-gedeeld, archiefvlag), dan komt het deck mee ook
@@ -149,6 +150,11 @@ router.get("/changes", authMiddleware, async (req, res) => {
                AND s2.accepted_at IS NOT NULL)`,
         [req.user.id, sinceDate]
       ),
+      // Examens: áltijd de volledige set (snapshot, geen `since`-filter) — de
+      // client vervangt zijn Hive-box integraal. Zo hebben verwijderen én
+      // toegangsverlies (groep verlaten/gekickt/opgeheven) geen tombstones of
+      // removed-mechaniek nodig; de set is laag-cardinaal (EXAM_PLAN.md §6).
+      fetchExamObjects(pool, req.user.id),
     ]);
 
     res.json({
@@ -160,6 +166,7 @@ router.get("/changes", authMiddleware, async (req, res) => {
       cards: cardsResult.rows,
       progress: progressResult.rows,
       removed_deck_ids: removedResult.rows.map((r) => r.deck_id),
+      exams,
     });
 
   } catch (err) {

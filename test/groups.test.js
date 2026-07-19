@@ -16,9 +16,30 @@ import {
 } from "./helpers.js";
 
 const createdUserIds = [];
-async function freshUser() {
+
+// Groepsbeheer is pro (GROUP_MANAGEMENT, EXAM_PLAN.md §4): testusers krijgen
+// standaard een actief pro-abonnement zodat de bestaande flows blijven werken;
+// de gating-tests onderaan vragen expliciet { pro: false }.
+async function grantPro(userId) {
+  await pool.query(
+    `INSERT INTO subscriptions (user_id, product_key) VALUES ($1, 'pro')`,
+    [userId]
+  );
+}
+
+async function expirePro(userId) {
+  await pool.query(
+    `UPDATE subscriptions
+     SET started_at = NOW() - interval '2 days', expires_at = NOW() - interval '1 day'
+     WHERE user_id = $1`,
+    [userId]
+  );
+}
+
+async function freshUser({ pro = true } = {}) {
   const user = await createUser();
   createdUserIds.push(user.id);
+  if (pro) await grantPro(user.id);
   return { user, token: tokenFor(user.id) };
 }
 
@@ -393,5 +414,130 @@ describe("Groepen", () => {
       .set("Authorization", `Bearer ${joinerToken}`)
       .send({ code: group.join_code, password: "nieuw-wachtwoord" });
     assert.equal(newPw.status, 201);
+  });
+});
+
+// Pro-gating (EXAM_PLAN.md §4): aanmaken/wijzigen vereist GROUP_MANAGEMENT;
+// joinen, opruimen en modereren blijven vrij — ook met een verlopen abo.
+describe("Groepen: pro-gating (GROUP_MANAGEMENT)", () => {
+  test("zonder pro: groep aanmaken 403; joinen en vertrekken vrij", async () => {
+    const { token: ownerToken } = await freshUser();
+    const { user: freeUser, token: freeToken } = await freshUser({ pro: false });
+
+    const denied = await request(app)
+      .post("/v2/groups")
+      .set("Authorization", `Bearer ${freeToken}`)
+      .send({ name: "Gratis club", password: "wachtwoord123" });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.body.code, "entitlement_required");
+    assert.equal(denied.body.entitlement, "group_management");
+
+    const create = await request(app)
+      .post("/v2/groups")
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .send({ name: "Club", password: "wachtwoord123" });
+    assert.equal(create.status, 201);
+    const group = create.body;
+
+    const join = await request(app)
+      .post("/v2/groups/join")
+      .set("Authorization", `Bearer ${freeToken}`)
+      .send({ code: group.join_code, password: "wachtwoord123" });
+    assert.equal(join.status, 201, "joinen moet zonder pro kunnen");
+
+    // Deck aan de catalogus toevoegen is wél gegate voor het gratis lid.
+    const deck = await createDeck(freeUser.id, "Gratis deck");
+    const addDeck = await request(app)
+      .post(`/v2/groups/${group.id}/decks`)
+      .set("Authorization", `Bearer ${freeToken}`)
+      .send({ deck_id: deck.id });
+    assert.equal(addDeck.status, 403);
+    assert.equal(addDeck.body.code, "entitlement_required");
+
+    const leave = await request(app)
+      .delete(`/v2/groups/${group.id}/members/${freeUser.id}`)
+      .set("Authorization", `Bearer ${freeToken}`);
+    assert.equal(leave.status, 204, "zelf vertrekken moet zonder pro kunnen");
+  });
+
+  test("owner met verlopen pro: modereren en opheffen vrij, wijzigen 403", async () => {
+    const { user: owner, token: ownerToken } = await freshUser();
+    const { user: joiner, token: joinerToken } = await freshUser({ pro: false });
+
+    const create = await request(app)
+      .post("/v2/groups")
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .send({ name: "Verloopclub", password: "wachtwoord123", require_approval: true });
+    const group = create.body;
+
+    await request(app)
+      .post("/v2/groups/join")
+      .set("Authorization", `Bearer ${joinerToken}`)
+      .send({ code: group.join_code, password: "wachtwoord123" });
+
+    await expirePro(owner.id);
+
+    // Beheer is dicht…
+    const edit = await request(app)
+      .put(`/v2/groups/${group.id}`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .send({ name: "Nieuwe naam" });
+    assert.equal(edit.status, 403);
+    assert.equal(edit.body.code, "entitlement_required");
+
+    // …maar de join-flow en moderatie blijven werken.
+    const approve = await request(app)
+      .post(`/v2/groups/${group.id}/members/${joiner.id}/approve`)
+      .set("Authorization", `Bearer ${ownerToken}`);
+    assert.equal(approve.status, 200, "approve moet zonder pro kunnen");
+
+    const kick = await request(app)
+      .delete(`/v2/groups/${group.id}/members/${joiner.id}`)
+      .set("Authorization", `Bearer ${ownerToken}`);
+    assert.equal(kick.status, 204, "kick moet zonder pro kunnen");
+
+    const destroy = await request(app)
+      .delete(`/v2/groups/${group.id}`)
+      .set("Authorization", `Bearer ${ownerToken}`);
+    assert.equal(destroy.status, 204, "opheffen moet zonder pro kunnen");
+  });
+
+  test("catalogus-carve-out: eigen deck terugtrekken vrij, andermans deck vereist pro", async () => {
+    const { user: owner, token: ownerToken } = await freshUser();
+    const { user: member, token: memberToken } = await freshUser();
+
+    const create = await request(app)
+      .post("/v2/groups")
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .send({ name: "Carve-out", password: "wachtwoord123" });
+    const group = create.body;
+
+    await request(app)
+      .post("/v2/groups/join")
+      .set("Authorization", `Bearer ${memberToken}`)
+      .send({ code: group.join_code, password: "wachtwoord123" });
+
+    // Lid (nog mét pro) zet zijn deck in de catalogus.
+    const deck = await createDeck(member.id, "Lid-deck");
+    const add = await request(app)
+      .post(`/v2/groups/${group.id}/decks`)
+      .set("Authorization", `Bearer ${memberToken}`)
+      .send({ deck_id: deck.id });
+    assert.equal(add.status, 201);
+
+    // Owner zonder pro mag andermans deck niet uit de catalogus halen.
+    await expirePro(owner.id);
+    const ownerPull = await request(app)
+      .delete(`/v2/groups/${group.id}/decks/${deck.id}`)
+      .set("Authorization", `Bearer ${ownerToken}`);
+    assert.equal(ownerPull.status, 403);
+    assert.equal(ownerPull.body.code, "entitlement_required");
+
+    // Het lid zelf mag zijn eigen deck ook zonder pro terugtrekken.
+    await expirePro(member.id);
+    const memberPull = await request(app)
+      .delete(`/v2/groups/${group.id}/decks/${deck.id}`)
+      .set("Authorization", `Bearer ${memberToken}`);
+    assert.equal(memberPull.status, 204);
   });
 });

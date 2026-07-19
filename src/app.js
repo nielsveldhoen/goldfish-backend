@@ -16,6 +16,7 @@ import contactRoutes from "./routes/contacts.js";
 import subscriptionRoutes from "./routes/subscriptions.js";
 import shareRoutes from "./routes/shares.js";
 import groupRoutes from "./routes/groups.js";
+import examRoutes from "./routes/exams.js";
 import { requireClientVersion, minClientBuild } from "./middleware/clientVersion.js";
 import { apiLimiter } from "./middleware/limiters.js";
 import { securityEvent, clientIp } from "./utils/securityLog.js";
@@ -90,6 +91,7 @@ api.use("/sync", syncRoutes);
 api.use("/stats", statsRoutes);
 api.use("/contacts", contactRoutes);
 api.use("/groups", groupRoutes);
+api.use("/exams", examRoutes);
 api.use("/subscriptions", subscriptionRoutes);
 
 // Open discovery-endpoint: nooit achter de client-versiegate, zodat een te oude

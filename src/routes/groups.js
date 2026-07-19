@@ -9,11 +9,23 @@
 // GET /v2/groups en verwerkt de WS-events group_updated (vol object),
 // group_invite_received (vol object), group_removed ({id}) en deck_removed.
 // In group-responses staan NOOIT e-mailadressen — alleen user_id + username.
+//
+// Pro-gating (EXAM_PLAN.md §4, entitlement GROUP_MANAGEMENT): aanmaken en
+// wijzigen is pro; joinen, opruimen en modereren blijven vrij zodat een
+// verlopen abonnement nooit iemand opsluit. 💰 = requireEntitlement op:
+// POST /, PUT /:id, PUT /:id/password, POST /:id/invites,
+// PUT /:id/members/:user_id, POST /:id/decks en (alleen voor andermans deck)
+// DELETE /:id/decks/:deck_id. Vrij: join, invite accepteren/afwijzen,
+// approve, kick/zelf vertrekken, groep opheffen, dashboard-add en het
+// terugtrekken van je eigen deck uit de catalogus.
 import crypto from "crypto";
 import express from "express";
 import argon2 from "argon2";
 import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
+import { requireEntitlement } from "../middleware/entitlements.js";
+import { getEntitlements } from "../utils/entitlements.js";
+import { ENTITLEMENTS } from "../config/products.js";
 import { inviteLimiter, joinLimiter } from "../middleware/limiters.js";
 import { broadcast, broadcastGroup } from "../ws.js";
 import { LIMITS, invalidString, invalidBoolean, firstError } from "../utils/validate.js";
@@ -148,7 +160,8 @@ router.get("/", authMiddleware, async (req, res) => {
 // ========================
 // POST /groups — groep aanmaken
 // ========================
-router.post("/", authMiddleware, async (req, res) => {
+router.post("/", authMiddleware,
+  requireEntitlement(ENTITLEMENTS.GROUP_MANAGEMENT), async (req, res) => {
   const { name, description, password, require_approval } = req.body;
 
   const invalid = firstError(
@@ -289,7 +302,8 @@ router.post("/join", authMiddleware, joinLimiter, async (req, res) => {
 // ========================
 // PUT /groups/:id — naam/omschrijving/goedkeuringstoggle (owner)
 // ========================
-router.put("/:id", authMiddleware, async (req, res) => {
+router.put("/:id", authMiddleware,
+  requireEntitlement(ENTITLEMENTS.GROUP_MANAGEMENT), async (req, res) => {
   const { id } = req.params;
   const { name, description, require_approval } = req.body;
 
@@ -357,7 +371,8 @@ router.put("/:id", authMiddleware, async (req, res) => {
 // ========================
 // PUT /groups/:id/password — join-wachtwoord wisselen (owner, na een kick)
 // ========================
-router.put("/:id/password", authMiddleware, async (req, res) => {
+router.put("/:id/password", authMiddleware,
+  requireEntitlement(ENTITLEMENTS.GROUP_MANAGEMENT), async (req, res) => {
   const { id } = req.params;
   const { password } = req.body;
 
@@ -452,7 +467,8 @@ router.delete("/:id", authMiddleware, async (req, res) => {
 // ========================
 // POST /groups/:id/invites — contact uitnodigen (elk actief lid)
 // ========================
-router.post("/:id/invites", authMiddleware, inviteLimiter, async (req, res) => {
+router.post("/:id/invites", authMiddleware, inviteLimiter,
+  requireEntitlement(ENTITLEMENTS.GROUP_MANAGEMENT), async (req, res) => {
   const { id } = req.params;
   const { user_id } = req.body;
 
@@ -627,7 +643,8 @@ router.post("/:id/members/:user_id/approve", authMiddleware, async (req, res) =>
 // ========================
 // PUT /groups/:id/members/:user_id — bevoegdheden zetten (owner)
 // ========================
-router.put("/:id/members/:user_id", authMiddleware, async (req, res) => {
+router.put("/:id/members/:user_id", authMiddleware,
+  requireEntitlement(ENTITLEMENTS.GROUP_MANAGEMENT), async (req, res) => {
   const { id, user_id } = req.params;
   const { can_add_decks } = req.body;
 
@@ -754,7 +771,8 @@ router.delete("/:id/members/:user_id", authMiddleware, async (req, res) => {
 // ========================
 // POST /groups/:id/decks — eigen deck aan de catalogus toevoegen
 // ========================
-router.post("/:id/decks", authMiddleware, async (req, res) => {
+router.post("/:id/decks", authMiddleware,
+  requireEntitlement(ENTITLEMENTS.GROUP_MANAGEMENT), async (req, res) => {
   const { id } = req.params;
   const { deck_id } = req.body;
 
@@ -824,6 +842,12 @@ router.post("/:id/decks", authMiddleware, async (req, res) => {
 // ========================
 // Toegestaan voor de toevoeger (eigen deck terugtrekken) en de group-owner.
 // Revoket de groepsshares van alle leden op dit deck.
+//
+// Gating met carve-out (EXAM_PLAN.md §4): je éigen deck terugtrekken
+// (toevoeger of deck-eigenaar) is privacy/opruimen en blijft vrij; de
+// group-owner die andermans deck verwijdert doet catalogusbeheer en heeft
+// GROUP_MANAGEMENT nodig. Daarom hier een in-handler check i.p.v. het
+// route-level middleware.
 router.delete("/:id/decks/:deck_id", authMiddleware, async (req, res) => {
   const { id, deck_id } = req.params;
 
@@ -835,14 +859,41 @@ router.delete("/:id/decks/:deck_id", authMiddleware, async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    const deleted = await client.query(
-      `DELETE FROM group_decks gd
-       USING groups g
+    const rowRes = await client.query(
+      `SELECT gd.added_by, d.user_id AS deck_owner_id, g.owner_id AS group_owner_id
+       FROM group_decks gd
+       JOIN groups g ON g.id = gd.group_id AND g.deleted_at IS NULL
+       JOIN decks d ON d.id = gd.deck_id
        WHERE gd.group_id = $1 AND gd.deck_id = $2
-         AND g.id = gd.group_id AND g.deleted_at IS NULL
-         AND (gd.added_by = $3 OR g.owner_id = $3)
-       RETURNING gd.id`,
-      [id, deck_id, req.user.id]
+       FOR UPDATE OF gd`,
+      [id, deck_id]
+    );
+    const row = rowRes.rows[0];
+    const isOwnDeck = row
+      && (row.added_by === req.user.id || row.deck_owner_id === req.user.id);
+    if (!row || (!isOwnDeck && row.group_owner_id !== req.user.id)) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Deck not found" });
+    }
+
+    if (!isOwnDeck) {
+      const entitlements = await getEntitlements(req.user.id);
+      if (!entitlements.has(ENTITLEMENTS.GROUP_MANAGEMENT)) {
+        await client.query("ROLLBACK");
+        // Zelfde vorm als requireEntitlement, zodat de client één 403-pad kent.
+        return res.status(403).json({
+          error: "Subscription required",
+          code: "entitlement_required",
+          entitlement: ENTITLEMENTS.GROUP_MANAGEMENT,
+        });
+      }
+    }
+
+    const deleted = await client.query(
+      `DELETE FROM group_decks
+       WHERE group_id = $1 AND deck_id = $2
+       RETURNING id`,
+      [id, deck_id]
     );
 
     if (deleted.rowCount === 0) {
