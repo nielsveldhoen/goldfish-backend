@@ -59,10 +59,11 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe("WebSocket auth en robuustheid", () => {
   // Zonder token in de URL wacht de server op een auth-bericht (SECURITY_PLAN
-  // 2.7); komt dat niet binnen de auth-timeout, dan alsnog 4001.
-  test("zonder token → close 4001 na de auth-timeout", async () => {
+  // 2.7); komt dat niet binnen de auth-timeout, dan 4003 — géén 4001, want er
+  // is geen token beoordeeld en de client mag (moet) gewoon reconnecten.
+  test("zonder token → close 4003 na de auth-timeout", async () => {
     const { code } = await waitForClose(connect(""));
-    assert.equal(code, 4001);
+    assert.equal(code, 4003);
   });
 
   test("ongeldig token → close 4001", async () => {

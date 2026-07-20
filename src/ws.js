@@ -11,6 +11,12 @@ const CLOSE_UNAUTHORIZED = 4001;
 // Verbindingslimiet overschreden: de oudste socket gaat dicht. Bewust géén
 // 4001 — die socket is niet ongeautoriseerd en de client mag reconnecten.
 const CLOSE_TOO_MANY = 4002;
+// Auth-timeout: er is géén token beoordeeld (er kwam er geen binnen). Bewust
+// ≠ 4001: de client behandelt 4001 als "token afgekeurd" en logt uit, maar
+// een client met een drukke event-loop (koude bootstrap op een trage
+// web-debugbuild) kan de deadline simpelweg missen — die moet gewoon
+// opnieuw verbinden.
+const CLOSE_AUTH_TIMEOUT = 4003;
 
 // Server-side heartbeat: elke HEARTBEAT_INTERVAL_MS een ping-frame; wie dan
 // nog niet op de vorige ping heeft gepongd (≈ 2 intervallen ≈ 60s) gaat dicht.
@@ -77,7 +83,7 @@ export function createWsServer(server) {
     // gratis een socket open.
     const timer = setTimeout(() => {
       securityEvent("ws_auth_failed", { ip: socket.clientIp, reason: "auth_timeout" });
-      socket.close(CLOSE_UNAUTHORIZED, "Unauthorized");
+      socket.close(CLOSE_AUTH_TIMEOUT, "Auth timeout");
     }, AUTH_TIMEOUT_MS);
 
     const onAuthMessage = (data) => {

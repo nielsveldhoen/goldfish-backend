@@ -1639,7 +1639,7 @@ Stuur direct na `open` als eerste bericht:
 ```json
 { "type": "auth", "token": "<jwt>" }
 ```
-De server heeft **5 seconden** om het auth-bericht te ontvangen; blijft het uit, dan sluit hij met `4001`. Vóór authenticatie worden andere berichten genegeerd (de timeout loopt door). Bij succes volgt geen bevestiging — de verbinding blijft simpelweg open en events beginnen te stromen.
+De server heeft **5 seconden** om het auth-bericht te ontvangen; blijft het uit, dan sluit hij met `4003` (auth-timeout — er is geen token beoordeeld, de client hoort gewoon te reconnecten). Vóór authenticatie worden andere berichten genegeerd (de timeout loopt door). Bij succes volgt geen bevestiging — de verbinding blijft simpelweg open en events beginnen te stromen.
 
 **(b) Token in de query string (verouderd, blijft voorlopig werken):**
 ```
@@ -1651,8 +1651,9 @@ Dit pad blijft ondersteund zolang er clients zijn die het gebruiken, maar verdwi
 
 | Code | Betekenis | Reconnecten? |
 |------|-----------|--------------|
-| `4001` | Ongeldig, ontbrekend of verlopen token (ook: auth-timeout). Verloopt het token terwijl de verbinding openstaat, dan sluit de server eveneens met `4001`. | **Nee** — opnieuw inloggen |
+| `4001` | Ongeldig, ontbrekend of verlopen token. Verloopt het token terwijl de verbinding openstaat, dan sluit de server eveneens met `4001`. Advies aan de client: verifieer met `GET /v2/auth/me` vóór het weggooien van de sessie — alleen een echte `401` betekent opnieuw inloggen. | **Nee** — opnieuw inloggen (na REST-verificatie) |
 | `4002` | Te veel gelijktijdige verbindingen voor deze gebruiker (max. 10); de **oudste** socket wordt gesloten om plaats te maken | Ja (met backoff) |
+| `4003` | Auth-timeout: geen (parseerbaar) auth-bericht binnen 5 s na de upgrade. Zegt niets over het token. | Ja (met backoff) |
 | `1009` | Bericht groter dan 64 KiB (`maxPayload`) | Ja |
 
 ### Berichtformaat
