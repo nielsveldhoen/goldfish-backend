@@ -65,6 +65,20 @@ gebruik (oude client kan [3]-logs niet lezen) en de branch naar main mergen.
    úúrentries (opeenvolgende antwoorden) i.p.v. dag-instants, zodat
    longestEver nooit groter kan zijn dan wat één wachttijd ooit bewezen
    heeft — anders hing een kaart onterecht permanent "in recovery".
+10. **Retention-jump vervalt, eerste herstel × 1 (besluit Niels
+    2026-07-21)**: besluit 9 maakt de retention-jump overbodig — recovery
+    verloopt via de multiplier, niet via een sprong terug naar een fractie van
+    de oude gap. `_retentionJumpHours` en de `_retention`-tabel zijn
+    geschrapt. De fout blijft de volgende gap wél ankeren, dus de wachttijd
+    erna telt gewoon mee in de basis (met het 12u-overduekrediet — en omdat
+    een fout de kaart meteen due maakt, bewijst een lapse uitzitten hoogstens
+    12u). Wat vervalt is de vermenigvuldiging: het EERSTE goede antwoord na
+    een lapse krijgt die gewachte tijd × 1, daarna groeit hij weer normaal.
+    In een sessie heb je niets gewacht, dus in-sessie herstel landt op het
+    eerstvolgende hele uur — 14:29 → 15:00, 14:30 → 16:00 — voor een rijpe
+    kaart net zo goed als voor een verse (met de jump werd dat 202u).
+    `hadWrongThisSession` blijft daarmee ongebruikt: de regel is
+    sessie-onafhankelijk en puur uit het log af te leiden.
 
 ## Waarom scores via dag-aggregatie
 
@@ -119,24 +133,25 @@ Bestanden: `lib/services/repetition_service_base.dart`, nieuw
        `hadWrongThisSession` heeft in v3 geen effect op de planning;
      - een FOUT antwoord is een harde reset: due NÚ (afgerond uur), ongeacht
        de grade ("fout is fout", besluit Niels 2026-07-17) — de grade voedt
-       alleen de difficulty-factor en de retention-fractie. Het
-       eerstvolgende goede antwoord start de ladder op 1u, of neemt de
-       retention-jump als er vóór de fout een langere gap bewezen was;
-       de grens ligt altijd op het halve uur (14:29 → +1u = 15:00,
-       14:30 → +1u = 16:00);
-     - herstel na een fout (ook eerder dezelfde dag) = de retention-jump in
-       uren: fractie van de bewezen pre-lapse gap per lapse-grade (F 70% …
-       J reset naar de 1u-ladderstart), min 1u — de gap komt uit de
-       úúrentries vlak vóór de fout, dus een vandaag gedrilde kaart herstelt
-       kort (bv. 70% van 2u → 1u); geen bewezen gap → 1u-ladderstart;
+       alleen nog de difficulty-factor. De fout ankert de volgende gap wél,
+       dus de wachttijd erna telt mee in de basis (besluit 10);
+     - herstel na een fout (ook eerder dezelfde dag) verloopt niet via een
+       sprong maar via de klim: het eerste goede antwoord krijgt de gewachte
+       tijd × 1 (min 1u, overdue gecapt op 12u), daarna de bonus-multiplier
+       van besluit 9, gecapt op `longestEver`. De retention-jump en de
+       `_retention`-tabel bestaan niet meer (besluit 10). In-sessie is die
+       wachttijd ~0, dus herstel landt op het eerstvolgende hele uur
+       (14:29 → 15:00, 14:30 → 16:00), rijp of vers;
      - overdue telt mee in de gap, gecapt op 12u (besluit Niels 2026-07-17):
        earned = raw − max(0, overdue − 12). Wie 6u wacht op een kaart die na
        1u due was, bewijst 6u; wie 3 dagen te laat is krijgt gepland
-       interval + 12u, niet + 72u;
+       interval + 12u, niet + 72u. De gap loopt tegen het vorige ANTWOORD,
+       goed of fout — één goed antwoord na een wachttijd herneemt die;
      - één interval-formule voor elk goed antwoord (besluit Niels 2026-07-16,
        geen aparte ladder-branch): interval = langste verdiende gap tussen de
        antwoorden (uurentries) in de huidige streak × de vermenigvuldigings-
-       factor (1–3) uit de logs, afgerond op hele uren, min 1u. Sub-dag- en
+       factor uit de logs (1–2 normaal, 2–4 in recovery — besluit 9),
+       afgerond op hele uren, min 1u. Sub-dag- en
        meerdaagse gaps liggen op dezelfde schaal, dus drillen klimt naadloos
        1-2-4-8-16-32u-… (bij factor 2) door de daggrens heen. Een herhaal-
        goed gebruikt de formule zónder de 24u-vloer; doordat de basis een
@@ -145,9 +160,10 @@ Bestanden: `lib/services/repetition_service_base.dart`, nieuw
        eigen uurentry gelogd; de dag-aggregatie leest de eerste beurt van de
        dag, dus de scores veranderen niet mee;
      - streak-gaps en `longestEver` in uren, `earned = raw − overdueUren`;
-     - `historicalMastery` = longestEverUren/8760; `streakDays/365` → uren/8760;
-     - retention-jump: zelfde formule, ×24; cheat = cheatRecoveryMode
-       (besluit 8: basis × 1, gap-gebaseerde exit, geen stappen);
+     - `streakDays/365` → uren/8760; `historicalMastery × recoveryFactor` is
+       vervallen (besluit 9);
+     - cheat = cheatRecoveryMode (besluit 8: basis × 1, gap-gebaseerde exit,
+       geen stappen, geen 24u-minimum); de X ankert die gap wél;
      - interval afronden op hele uren, min 1u;
      - debug-info in uren rapporteren.
    - `mergeImpl`: sleutel wordt het (UTC-dag, uur)-paar zoals opgeslagen i.p.v. dag;
