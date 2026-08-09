@@ -1,8 +1,15 @@
 # Database-migraties
 
 SQL-migraties die als `postgres`-superuser gedraaid moeten worden (de
-app-user `goldfish` heeft geen DDL-rechten). Op de lokale dev-database zijn
-beide al uitgevoerd op 2026-06-12; op de remote server nog draaien.
+app-user `goldfish` heeft geen DDL-rechten).
+
+**Op productie draai je ze niet met de hand:** `../scripts/deploy.sh` vergelijkt deze map met
+`schema_migrations` op de server en voert het ontbrekende deel uit (na een DB-dump, via stdin,
+in volgorde). Zie [../DEPLOY.md](../DEPLOY.md). Migratie 003 en hoger zijn transactioneel en
+zetten zelf hun rij in `schema_migrations`; **001 en 002 zijn ouder dan die tracking** en
+worden door het script overgeslagen — 002 mag maar één keer draaien.
+
+Handmatig (lokaal, of om een oude database bij te werken):
 
 ```bash
 sudo -u postgres psql -d goldfish -f 001_progress_deleted_at.sql

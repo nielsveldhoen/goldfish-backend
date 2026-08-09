@@ -1,5 +1,12 @@
 # Goldfish — Schaal- en kostenplan (Oracle Cloud)
 
+> **VEROUDERD — historische context.** Dit plan beschrijft de Oracle-situatie van juli 2026.
+> Sinds 16-07-2026 draait Goldfish op **Hetzner Cloud** (CX23: 2 vCPU / 4 GB / 40 GB,
+> PostgreSQL 18), waarmee de RAM-bottleneck en de meeste upgrade-scenario's hieronder
+> vervallen zijn. Actuele server- en deploy-informatie staat in [DEPLOY.md](DEPLOY.md).
+> De redenering over meetpunten en groeidrempels blijft bruikbaar; de bedragen, shapes en
+> het IP `141.148.226.78` niet.
+
 *Opgesteld: 2026-07-07. Prijzen zijn OCI PAYG-lijstprijzen (USD) van juli 2026.*
 
 ## Uitgangssituatie

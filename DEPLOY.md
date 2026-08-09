@@ -1,120 +1,298 @@
-# Goldfish backend — deploy
+# Goldfish — deploy
 
-De server draait op **Oracle Cloud (Always Free)**, achter **nginx**, met **pm2** als
-procesmanager. Deze notitie beschrijft de deploy zoals hij nu écht werkt — een eerdere versie
-beschreef nog Caddy; dat klopt niet meer sinds de domein/TLS-migratie.
+De productie draait sinds **16-07-2026 op Hetzner Cloud** (daarvóór Oracle Always Free; die
+is verlaten na drie storingen in twee dagen). Backend achter **nginx**, met **pm2** als
+procesmanager; de webfrontend is een statische Flutter-build op dezelfde server.
+
+**De hele deploy zit in twee scripts:**
+
+```bash
+./scripts/deploy.sh          # backend: tests → rsync → migraties → npm ci → pm2 restart → healthcheck
+./scripts/deploy-web.sh      # webfrontend: build/web/ → /var/www/goldfish (met terugrolkopie)
+```
+
+Draai eerst `./scripts/deploy.sh --dry-run` als je wilt zien wat er zou gebeuren; dat wijzigt
+niets op de server.
+
+---
 
 ## Productie in het kort
 
 | | |
 |---|---|
-| Server | Ubuntu 24.04 LTS, `ubuntu@141.148.226.78` (static reserved IP) |
-| Repo op de server | `/home/ubuntu/goldfish/goldfish-backend` |
-| Proces | pm2, naam **`goldfish-backend`** (start automatisch bij boot) |
-| Reverse proxy | nginx → `127.0.0.1:3000`; TLS via Let's Encrypt/certbot |
-| Database | PostgreSQL 16, alleen op localhost; app-rol `goldfish` (DML-only) |
-| Env | **`src/.env`** (let op: niet in de repo-root), staat niet in git |
-| Backups | dagelijks 03:30 → `/var/backups/goldfish` + off-box naar OCI Object Storage |
+| Server | Hetzner Cloud `niels-server`, CX23 (2 vCPU / 4 GB / 40 GB), locatie DE, ~€8/mnd |
+| Toegang | `ssh -i ~/.ssh/ssh-key-2026-05-31-goldfish.key root@178.104.88.142` (login als **root**) |
+| OS / stack | Ubuntu 26.04 LTS, PostgreSQL 18, Node 22 (NodeSource), nginx 1.28, pm2 7, certbot 4 |
+| App-user | **`goldfish`** (niet root) — code in **`/home/goldfish/backend`** |
+| Proces | pm2, naam **`goldfish-backend`**; systemd-unit `pm2-goldfish.service` (start na reboot) |
+| Bind | `HOST=127.0.0.1`, `PORT=3000` — alleen via nginx bereikbaar (ufw: 22/80/443) |
+| Reverse proxy | nginx sites: `goldfish` (apex + www) en `api-goldfishstudy` (proxy → 127.0.0.1:3000, incl. WS-upgrade) |
+| Database | PostgreSQL 18, db `goldfish`, app-rol `goldfish` (DML-only; tabellen zijn van `postgres`) |
+| Env | **`/home/goldfish/backend/src/.env`** (0600) — staat niet in git en gaat **nooit** mee met rsync |
+| Webfrontend | statische build in `/var/www/goldfish`, owner `goldfish:goldfish` |
+| TLS | Let's Encrypt via `certbot --nginx`, auto-renew via `certbot.timer` |
+| DNS | Cloudflare, **DNS-only / grijze wolk** — proxien breekt certbot én de WebSocket |
+| Backups | dagelijks 03:30 → `/var/backups/goldfish` (14 dagen). **Off-box backup ontbreekt nog** |
+
+Er is bewust **geen** git-pull-deploy op deze server: de deploy is een `rsync` vanaf je laptop.
+De server heeft geen deploy-key en hoeft niet bij GitHub te kunnen.
+
+---
+
+## Wat je op een nieuwe machine nodig hebt
+
+### 1. De SSH-sleutel (het enige echte geheim voor deployen)
+
+| Bestand | Waarvoor | Waar vandaan |
+|---|---|---|
+| `~/.ssh/ssh-key-2026-05-31-goldfish.key` | root-toegang tot de Hetzner-server (RSA-2048, sinds 31-05-2026) | kopieer van je huidige laptop (`~/.ssh/`) |
+| `~/.ssh/ssh-key-2026-05-31-goldfish.key.pub` | handig, niet verplicht | idem |
+| `~/.ssh/fedora-hetzner` | tweede sleutel, voor de Fedora-machine (ed25519, aangemaakt 09-08-2026, `SHA256:eCYqALGjjPtBoMDqcqtjaaeSycSY5u37fZId4xjrtBk`) | staat al in `/root/.ssh/authorized_keys`; deployen met `GOLDFISH_SSH_KEY=~/.ssh/fedora-hetzner ./scripts/deploy.sh` |
+| `~/.ssh/github_key` | `git push` naar `git@github.com:nielsveldhoen/goldfish-backend.git` | huidige laptop, of maak een nieuwe en zet hem in GitHub → Settings → SSH keys |
+
+Kopieer de private key **niet** via een chatvenster of e-mail; gebruik een USB-stick, een
+wachtwoordmanager met bestandsbijlagen, of `scp` tussen de twee machines. Daarna:
+
+```bash
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/ssh-key-2026-05-31-goldfish.key ~/.ssh/github_key
+ssh -i ~/.ssh/ssh-key-2026-05-31-goldfish.key root@178.104.88.142 'hostname'   # → niels-server
+```
+
+Wil je een **nieuwe** sleutel gebruiken in plaats van de bestaande kopiëren:
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/goldfish-<machine>.key -C "goldfish deploy <machine>"
+# publieke deel toevoegen op de server (vanaf een machine die er al in kan):
+ssh -i ~/.ssh/ssh-key-2026-05-31-goldfish.key root@178.104.88.142 \
+  "echo '<inhoud van goldfish-<machine>.key.pub>' >> /root/.ssh/authorized_keys"
+# en daarna deployen met:
+GOLDFISH_SSH_KEY=~/.ssh/goldfish-<machine>.key ./scripts/deploy.sh
+```
+
+### 2. Een lokale `src/.env` — alleen om te ontwikkelen en te testen
+
+De productie-`.env` staat **uitsluitend op de server** en wordt door de rsync-excludes
+beschermd. Lokaal heb je een eigen `src/.env` nodig (kopie van `src/.env.example`) met:
+
+| Key | Lokaal | Opmerking |
+|---|---|---|
+| `DATABASE_URL` | je **lokale** postgres | `postgresql://goldfish:<lokaal-pw>@localhost:5432/goldfish` |
+| `JWT_SECRET` | zelf genereren | `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"` — hoeft níét gelijk te zijn aan productie |
+| `PORT` / `HOST` | `3000` / weglaten | lokaal juist niet op 127.0.0.1 vastzetten als je vanaf je telefoon test |
+| `TRUST_PROXY` | **weglaten** | alleen achter nginx; anders omzeilt iedereen de rate limiter met een verzonnen `X-Forwarded-For` |
+| `RESEND_API_KEY` | eigen key of dummy | zonder geldige key falen verificatie-/reset-mails (de rest werkt) |
+| `FROM_EMAIL`, `APP_URL` | lokale waarden | `APP_URL` bepaalt de links in mails |
+
+### 3. Tooling
+
+`node` 22, `npm`, `rsync`, `ssh`, `curl`, en een lokale PostgreSQL voor `npm test`.
+Voor de webfrontend bovendien Flutter — in WSL: **de Windows-flutter**, zie onder.
+
+### 4. Geheimen die alleen op de server (moeten blijven) staan
+
+Voor het geval de server ooit opnieuw opgebouwd moet worden — dit is wat je dan terug moet
+hebben, en wat je dus ergens veilig bewaard wilt hebben:
+
+- `/home/goldfish/backend/src/.env` — `DATABASE_URL` (met het op 16-07-2026 geroteerde
+  DB-wachtwoord), `JWT_SECRET` (**roteren = iedereen uitloggen**), `RESEND_API_KEY`,
+  `FROM_EMAIL`, `APP_URL`, `CORS_ORIGINS`, `TRUST_PROXY=1`, `HOST=127.0.0.1`, `PORT=3000`.
+- `/root/dbpw` — kopie van het DB-wachtwoord (root-only).
+- Accounts, geen bestanden: **Hetzner Cloud** (console + rescue), **Cloudflare** (DNS),
+  **Resend** (mail), **GitHub**. Zonder Cloudflare-toegang kun je geen certificaat vernieuwen
+  na een IP-wissel.
+- Let's Encrypt-certificaten in `/etc/letsencrypt` hoef je niet te bewaren — certbot haalt
+  ze opnieuw op zolang de DNS klopt.
 
 ---
 
 ## Pre-deploy checklist
 
+`./scripts/deploy.sh` doet dit zelf, maar los draaien kan ook:
+
 ```bash
-npm test          # alle tests groen (vereist een lokale DB)
-npm audit         # geen bekende kwetsbaarheden
+npm test     # alle tests groen (vereist een lokale DB)
+npm audit    # geen bekende kwetsbaarheden
 ```
 
-**`npm audit` hoort bij elke deploy.** De dependency-lijst is bewust kort — houd dat zo, en
-voeg niets toe zonder noodzaak. Vindt `npm audit` iets:
+**`npm audit` hoort bij elke deploy.** De dependency-lijst is bewust kort — houd dat zo. Vindt
+audit iets:
 
-- **patch/minor fix** (`npm audit fix`): doen, lockfile committen, tests draaien.
-- **major/breaking fix**: niet zomaar doen. Beoordeel eerst of het lek dit aanvalsoppervlak
-  raakt (veel meldingen zitten in code-paden die wij niet gebruiken) en overleg met Niels.
+- **patch/minor** (`npm audit fix`): doen, lockfile committen, tests draaien.
+- **major/breaking**: niet zomaar. Beoordeel eerst of het lek dit aanvalsoppervlak raakt.
 
-Commit **altijd** de `package-lock.json` — de server installeert met `npm ci`, dus alles wat
-niet in de lockfile staat, komt er niet op.
+Commit **altijd** de `package-lock.json` — de server installeert met `npm ci`, dus wat niet in
+de lockfile staat, komt er niet op. En wijzigde de API? Werk **beide** `BACKEND_API.md`-bestanden
+bij (backend-repo én de Flutter-repo).
 
-## Deployen
+---
 
-De server **pullt zelf van GitHub**; alles moet dus gecommit én gepusht zijn.
+## Backend deployen
 
 ```bash
-git push origin main
+./scripts/deploy.sh
+```
 
-ssh -i ~/.ssh/ssh-key-2026-05-31-goldfish.key ubuntu@141.148.226.78
+Stap voor stap, zodat je weet wat het script doet (en het handmatig kunt overdoen):
 
-cd /home/ubuntu/goldfish/goldfish-backend
+```bash
+KEY=~/.ssh/ssh-key-2026-05-31-goldfish.key
+SRV=root@178.104.88.142
 
-# 1. Welke migraties draaiden er al? Vergelijk met migrations/ en draai alleen wat ontbreekt.
-sudo -u postgres psql -d goldfish -c "SELECT version FROM schema_migrations ORDER BY version;"
-#    (001 en 002 zijn ouder dan deze tracking en staan er niet in — dat klopt.)
+# 1. Welke migraties draaiden er al?
+ssh -i $KEY $SRV "sudo -u postgres psql -d goldfish -tAc \
+  'SELECT version FROM schema_migrations ORDER BY version;'"
+#    001 en 002 zijn ouder dan deze tracking en staan er niet in — dat klopt.
 
-# 2. Code ophalen
-git pull --ff-only
+# 2. Code overzetten. --exclude 'src/.env' is ESSENTIEEL (anders overschrijft je
+#    dev-.env de productiegeheimen). Excludes worden ook niet door --delete gewist,
+#    dus node_modules en de .env op de server blijven staan.
+rsync -az --delete --exclude node_modules --exclude .git --exclude test \
+  --exclude 'src/.env' --exclude '.env*' \
+  -e "ssh -i $KEY" ~/programming/goldfish/backend/ $SRV:/home/goldfish/backend/
+ssh -i $KEY $SRV "chown -R goldfish:goldfish /home/goldfish/backend"
 
-# 3. Nieuwe migraties draaien — als postgres, want de tabellen zijn van postgres
-#    en de app-rol mag geen DDL.
-sudo -u postgres psql -d goldfish -v ON_ERROR_STOP=1 -f migrations/0XX_naam.sql
+# 3. Eerst een dump, dan de ontbrekende migraties — als postgres, want de tabellen
+#    zijn van postgres en de app-rol mag geen DDL. Via STDIN, want postgres kan niet
+#    lezen in /home/goldfish. Elke migratie (003+) is transactioneel en zet zelf zijn
+#    rij in schema_migrations.
+ssh -i $KEY $SRV "sudo -u postgres /usr/local/bin/goldfish-backup.sh"
+ssh -i $KEY $SRV "sudo -u postgres psql -d goldfish -v ON_ERROR_STOP=1" < migrations/0XX_naam.sql
 
 # 4. Dependencies (nodig zodra package-lock.json wijzigde)
-npm ci --omit=dev
+ssh -i $KEY $SRV "runuser -l goldfish -c 'cd ~/backend && npm ci --omit=dev'"
 
-# 5. Herstarten
-pm2 restart goldfish-backend --update-env
+# 5. Herstarten — pm2 restart is veilig; de pm2-DAEMON nooit killen (zie Valkuilen)
+ssh -i $KEY $SRV "runuser -l goldfish -c 'pm2 restart goldfish-backend --update-env'"
 
 # 6. Controleren
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:3000/      # → 200
-pm2 logs goldfish-backend --lines 30 --nostream                      # → geen fouten
-```
-
-Extern nacontroleren:
-
-```bash
+ssh -i $KEY $SRV "curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/version"
+ssh -i $KEY $SRV "runuser -l goldfish -c 'pm2 logs goldfish-backend --lines 30 --nostream'"
 curl -s -o /dev/null -w "%{http_code}\n" https://api.goldfishstudy.app/version   # → 200
 curl -s -o /dev/null -w "%{http_code}\n" https://goldfishstudy.app/              # → 200
 ```
 
-Wijzigt de API? Werk **beide** `BACKEND_API.md`-bestanden bij (backend + frontend-repo).
+Opties van het script:
 
-## Environment (`src/.env`)
+| Optie | Effect |
+|---|---|
+| `--dry-run` | toont migratiestand en rsync-verschillen, wijzigt niets |
+| `--skip-tests` | slaat `npm test`/`npm audit` over (alleen bij een hotfix) |
+| `--yes` | vraagt niet om bevestiging |
 
-Kopieer `.env.example`. In productie zijn deze cruciaal:
+Andere server of sleutel? Alles is te overrulen met environment variables, bijv.
+`GOLDFISH_SSH_KEY=... GOLDFISH_SSH_TARGET=root@1.2.3.4 ./scripts/deploy.sh`.
 
-- **`HOST=127.0.0.1`** — de app luistert dan alleen op loopback en is uitsluitend via nginx
-  bereikbaar. Zonder deze regel bindt hij op `0.0.0.0` (de default in `src/index.js`).
-- **`TRUST_PROXY=1`** — alleen zetten wanneer de app achter nginx staat. Zonder proxy weglaten:
-  anders kan iedereen met een verzonnen `X-Forwarded-For` de rate limiters omzeilen.
-- **`APP_URL=https://api.goldfishstudy.app`** — verificatie- en reset-links in mails wijzen
-  anders naar het verkeerde adres.
-- **`CORS_ORIGINS`** — komma-gescheiden productie-origins (nu de twee frontend-domeinen).
-  Localhost is altijd toegestaan (dev), requests zónder Origin (native apps) ook.
-- **`JWT_SECRET`** — 32 random bytes. **Roteren logt iedereen uit**; alleen na overleg.
+---
+
+## Webfrontend deployen
+
+De Flutter-app staat in `/mnt/c/programming/goldfish/goldfish_v1` (de WSL-kopie is verouderd).
+
+```bash
+./scripts/deploy-web.sh --build     # bouwen én deployen (~8 min bouwen)
+./scripts/deploy-web.sh             # alleen de bestaande build/web/ deployen
+```
+
+Handmatig komt dat neer op:
+
+```bash
+# Bouwen MOET in WSL met de Windows-flutter: de Linux-flutter breekt op de
+# Windows-paden in .dart_tool/package_config.json, en /mnt/c/.../flutter/bin/flutter
+# is vanuit WSL onbruikbaar (CRLF → "/usr/bin/env: 'bash\r'").
+cd /mnt/c/programming/goldfish/goldfish_v1 && cmd.exe /c "flutter build web --release"
+
+# Terugrolkopie — rsync draait met --delete, zonder kopie is de vorige build weg
+ssh -i $KEY $SRV "rm -rf /var/www/goldfish.bak-prev && cp -a /var/www/goldfish /var/www/goldfish.bak-prev"
+
+rsync -az --delete -e "ssh -i $KEY" build/web/ $SRV:/var/www/goldfish/
+ssh -i $KEY $SRV "chown -R goldfish:goldfish /var/www/goldfish"
+```
+
+**Verifiëren doe je op de md5 van `main.dart.js`**, niet op een HTTP 200 — een 200 zegt niets
+over de versie:
+
+```bash
+curl -s https://goldfishstudy.app/main.dart.js | md5sum
+md5sum /mnt/c/programming/goldfish/goldfish_v1/build/web/main.dart.js
+```
+
+---
 
 ## Rollback
 
+**Backend** — er staat geen git-repo op de server, dus terugrollen doe je door de vórige
+commit opnieuw te deployen:
+
 ```bash
-cd /home/ubuntu/goldfish/goldfish-backend
 git log --oneline -5
-git reset --hard <vorige-commit>
-npm ci --omit=dev
-pm2 restart goldfish-backend --update-env
+git checkout <vorige-commit>
+./scripts/deploy.sh --skip-tests --yes
+git checkout main          # niet vergeten
 ```
 
-Let op: een **migratie draait niet vanzelf terug**. De meeste hebben een `_down.sql` — die moet
-je expliciet draaien, en alleen als de nieuwe versie echt niet te redden is. Bij twijfel: eerst
-een dump maken (`sudo -u postgres /usr/local/bin/goldfish-backup.sh`).
+**Webfrontend**:
+
+```bash
+ssh -i $KEY $SRV "rsync -a --delete /var/www/goldfish.bak-prev/ /var/www/goldfish/ && \
+  chown -R goldfish:goldfish /var/www/goldfish"
+```
+
+**Een migratie draait niet vanzelf terug.** De meeste hebben een `_down.sql` — draai die
+expliciet, en alleen als de nieuwe versie echt niet te redden is:
+
+```bash
+ssh -i $KEY $SRV "sudo -u postgres /usr/local/bin/goldfish-backup.sh"        # eerst een dump
+ssh -i $KEY $SRV "sudo -u postgres psql -d goldfish -v ON_ERROR_STOP=1" < migrations/0XX_naam_down.sql
+```
+
+---
+
+## Valkuilen (elk hier eerder misgegaan)
+
+- **`--exclude 'src/.env'` weglaten bij de rsync** overschrijft de productiegeheimen met je
+  dev-`.env`. Beide deploy-paden hebben de exclude; laat hem staan.
+- **De pm2-daemon handmatig killen** (`pm2 kill` + los `pm2 start`/`pm2 resurrect`) laat
+  `~/.pm2/pm2.pid` ontbreken, waarna `pm2-goldfish.service` faalt met "Can't open PID file"
+  (18-07-2026). `pm2 restart <app>` is wél veilig; na een daemon-kill herstarten via
+  `systemctl start pm2-goldfish.service`.
+- **`sudo -u postgres psql -f migrations/…`** faalt: postgres kan niet lezen in
+  `/home/goldfish`. Voer migraties via stdin aan (`… psql … < bestand.sql`).
+- **Cloudflare op oranje zetten** breekt de certbot-validatie en laat de WebSocket haperen.
+  DNS-only houden.
+- **`/var/www/goldfish` chownen naar www-data** — in de praktijk is de owner `goldfish:goldfish`;
+  na elke rsync opnieuw chownen.
+
+---
+
+## Env-variabelen (`src/.env` op de server)
+
+Uitgangspunt is `src/.env.example`. In productie zijn deze cruciaal:
+
+- **`HOST=127.0.0.1`** — de app luistert dan alleen op loopback en is uitsluitend via nginx
+  bereikbaar. Zonder deze regel bindt hij op `0.0.0.0`.
+- **`TRUST_PROXY=1`** — alleen achter nginx. Zonder proxy weglaten: anders omzeilt iedereen met
+  een verzonnen `X-Forwarded-For` de rate limiters.
+- **`APP_URL=https://api.goldfishstudy.app`** — verificatie- en reset-links in mails.
+- **`CORS_ORIGINS=https://goldfishstudy.app,https://www.goldfishstudy.app`** — localhost is
+  altijd toegestaan (dev), requests zónder Origin (native apps) ook.
+- **`JWT_SECRET`** — 32+ random bytes. **Roteren logt iedereen uit**; alleen na overleg.
+
+Wijzig je de `.env` op de server, dan is een `pm2 restart goldfish-backend --update-env` nodig.
+
+---
 
 ## Backups
 
-- Dagelijks 03:30 via `/etc/cron.d/goldfish-backup` → `/var/backups/goldfish` (14 dagen), plus
-  upload naar de OCI-bucket `goldfish-backups` via een **write-only** PAR-URL
-  (`/etc/goldfish-backup.env`, root-only).
-- Handmatig een backup maken: `sudo -u postgres /usr/local/bin/goldfish-backup.sh`
-- Log: `/var/log/goldfish-backup.log`. **Een mislukte off-box-upload (verlopen PAR!) logt een
-  waarschuwing maar laat de lokale backup slagen** — check dit log af en toe.
+- Dagelijks 03:30 via `/etc/cron.d/goldfish-backup` → `/var/backups/goldfish` (14 dagen),
+  script `/usr/local/bin/goldfish-backup.sh`, log `/var/log/goldfish-backup.log`.
+- Handmatig: `ssh -i $KEY $SRV "sudo -u postgres /usr/local/bin/goldfish-backup.sh"`
 - Terugzetten: `gunzip -c <dump>.sql.gz | sudo -u postgres psql -d <db>`. Test een restore
   altijd eerst in een aparte database, nooit rechtstreeks over `goldfish` heen.
+- ⚠️ **Open punt: er is nog géén off-box kopie** — precies de les van de Oracle-storing. Kies
+  een bestemming (Hetzner Storage Box, pull naar de laptop, andere cloud).
+
+---
 
 ## Security
 
@@ -124,7 +302,10 @@ De maatregelen en hun status staan in [SECURITY_PLAN.md](SECURITY_PLAN.md). Kort
 - Security-events (mislukte logins, geweigerde tokens, WS-auth-fouten, limiet-hits) gaan als
   JSON naar stderr, met tag `security` en **zonder** tokens, wachtwoorden of e-mailadressen:
   ```bash
-  pm2 logs goldfish-backend --lines 200 --nostream | grep '"tag":"security"'
+  ssh -i $KEY $SRV "runuser -l goldfish -c 'pm2 logs goldfish-backend --lines 200 --nostream'" \
+    | grep '"tag":"security"'
   ```
-- De app logt requests als methode + pad, **zonder query string** (daar zit het WS-token in);
+- De app logt requests als methode + pad, **zonder** query string (daar zit het WS-token in);
   nginx logt om dezelfde reden met het `noquery`-formaat.
+- Openstaand op deze box: sudo-user i.p.v. root-login, `limit_conn` per IP op het nginx-API-blok,
+  en de rest van fase 3 uit SECURITY_PLAN.md.
