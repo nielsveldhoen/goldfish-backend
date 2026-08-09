@@ -17,9 +17,23 @@
 set -euo pipefail
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-SSH_KEY="${GOLDFISH_SSH_KEY:-$HOME/.ssh/ssh-key-2026-05-31-goldfish.key}"
+# Sleutel en Flutter-repo heten per dev-machine anders; zonder env-var pakken we
+# de eerste die bestaat (Fedora eerst, dan de oude WSL-laptop).
+SSH_KEY="${GOLDFISH_SSH_KEY:-}"
+if [[ -z "$SSH_KEY" ]]; then
+  for candidate in "$HOME/.ssh/fedora-hetzner" "$HOME/.ssh/ssh-key-2026-05-31-goldfish.key"; do
+    [[ -f "$candidate" ]] && { SSH_KEY="$candidate"; break; }
+  done
+  SSH_KEY="${SSH_KEY:-$HOME/.ssh/fedora-hetzner}"
+fi
 SSH_TARGET="${GOLDFISH_SSH_TARGET:-root@178.104.88.142}"
-FLUTTER_DIR="${GOLDFISH_FLUTTER_DIR:-/mnt/c/programming/goldfish/goldfish_v1}"
+FLUTTER_DIR="${GOLDFISH_FLUTTER_DIR:-}"
+if [[ -z "$FLUTTER_DIR" ]]; then
+  for candidate in "$HOME/projects/goldfish/frontend" /mnt/c/programming/goldfish/goldfish_v1; do
+    [[ -d "$candidate" ]] && { FLUTTER_DIR="$candidate"; break; }
+  done
+  FLUTTER_DIR="${FLUTTER_DIR:-$HOME/projects/goldfish/frontend}"
+fi
 WEB_ROOT="${GOLDFISH_WEB_ROOT:-/var/www/goldfish}"
 WEB_OWNER="${GOLDFISH_WEB_OWNER:-goldfish:goldfish}"
 WEB_URL="${GOLDFISH_WEB_URL:-https://goldfishstudy.app}"
@@ -44,8 +58,14 @@ ok()   { printf '%s ✓  %s%s\n' "$GREEN" "$*" "$OFF"; }
 remote() { ssh -i "$SSH_KEY" -o ConnectTimeout=10 "$SSH_TARGET" "$@"; }
 
 # ── 1. BUILD ──────────────────────────────────────────────────────────────────
+[[ -f "$SSH_KEY" ]] || die "SSH-sleutel niet gevonden: $SSH_KEY
+    Geef een ander pad: GOLDFISH_SSH_KEY=/pad/naar/key $0"
+key_perms="$(stat -c '%a' "$SSH_KEY")"
+[[ "$key_perms" == "600" || "$key_perms" == "400" ]] || die "SSH-sleutel heeft mode $key_perms; ssh weigert dat.
+    Herstel met: chmod 600 $SSH_KEY"
+
 [[ -d "$FLUTTER_DIR" ]] || die "Flutter-repo niet gevonden: $FLUTTER_DIR
-    Geef het juiste pad mee: GOLDFISH_FLUTTER_DIR=/pad/naar/goldfish_v1 $0"
+    Geef het juiste pad mee: GOLDFISH_FLUTTER_DIR=/pad/naar/frontend $0"
 
 if (( DO_BUILD )); then
   step "1/5  Flutter-webbuild (~8 minuten)"

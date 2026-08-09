@@ -12,7 +12,7 @@ procesmanager; de webfrontend is een statische Flutter-build op dezelfde server.
 ```
 
 Draai eerst `./scripts/deploy.sh --dry-run` als je wilt zien wat er zou gebeuren; dat wijzigt
-niets op de server.
+niets op de server. Nieuwe machine? Begin bij **[DEV_SETUP.md](DEV_SETUP.md)**.
 
 ---
 
@@ -21,7 +21,7 @@ niets op de server.
 | | |
 |---|---|
 | Server | Hetzner Cloud `niels-server`, CX23 (2 vCPU / 4 GB / 40 GB), locatie DE, ~€8/mnd |
-| Toegang | `ssh -i ~/.ssh/ssh-key-2026-05-31-goldfish.key root@178.104.88.142` (login als **root**) |
+| Toegang | `ssh -i ~/.ssh/fedora-hetzner root@178.104.88.142` (login als **root**) |
 | OS / stack | Ubuntu 26.04 LTS, PostgreSQL 18, Node 22 (NodeSource), nginx 1.28, pm2 7, certbot 4 |
 | App-user | **`goldfish`** (niet root) — code in **`/home/goldfish/backend`** |
 | Proces | pm2, naam **`goldfish-backend`**; systemd-unit `pm2-goldfish.service` (start na reboot) |
@@ -41,55 +41,32 @@ De server heeft geen deploy-key en hoeft niet bij GitHub te kunnen.
 
 ## Wat je op een nieuwe machine nodig hebt
 
-### 1. De SSH-sleutel (het enige echte geheim voor deployen)
+De volledige opzet — tooling, sleutels, lokale database, `src/.env` — staat stap voor stap in
+**[DEV_SETUP.md](DEV_SETUP.md)**. Wat je daar niet vandaan haalt maar moet meebrengen, is een
+SSH-sleutel die de server kent:
 
-| Bestand | Waarvoor | Waar vandaan |
+| Sleutel | Machine | Opmerking |
 |---|---|---|
-| `~/.ssh/ssh-key-2026-05-31-goldfish.key` | root-toegang tot de Hetzner-server (RSA-2048, sinds 31-05-2026) | kopieer van je huidige laptop (`~/.ssh/`) |
-| `~/.ssh/ssh-key-2026-05-31-goldfish.key.pub` | handig, niet verplicht | idem |
-| `~/.ssh/fedora-hetzner` | tweede sleutel, voor de Fedora-machine (ed25519, aangemaakt 09-08-2026, `SHA256:eCYqALGjjPtBoMDqcqtjaaeSycSY5u37fZId4xjrtBk`) | staat al in `/root/.ssh/authorized_keys`; deployen met `GOLDFISH_SSH_KEY=~/.ssh/fedora-hetzner ./scripts/deploy.sh` |
-| `~/.ssh/github_key` | `git push` naar `git@github.com:nielsveldhoen/goldfish-backend.git` | huidige laptop, of maak een nieuwe en zet hem in GitHub → Settings → SSH keys |
+| `~/.ssh/fedora-hetzner` | Fedora | ed25519, 09-08-2026, `SHA256:eCYqALGjjPtBoMDqcqtjaaeSycSY5u37fZId4xjrtBk` |
+| `~/.ssh/ssh-key-2026-05-31-goldfish.key` | oude laptop | RSA-2048, sinds 31-05-2026 |
 
-Kopieer de private key **niet** via een chatvenster of e-mail; gebruik een USB-stick, een
-wachtwoordmanager met bestandsbijlagen, of `scp` tussen de twee machines. Daarna:
+Beide staan in `/root/.ssh/authorized_keys` en beide worden door de deployscripts **automatisch
+gevonden**; heet jouw sleutel anders, geef hem dan mee met `GOLDFISH_SSH_KEY`. Kopieer een
+private key **niet** via een chatvenster of e-mail — USB-stick, wachtwoordmanager of `scp`.
+Vergeet `chmod 600` niet, anders weigert ssh de sleutel.
 
-```bash
-chmod 700 ~/.ssh
-chmod 600 ~/.ssh/ssh-key-2026-05-31-goldfish.key ~/.ssh/github_key
-ssh -i ~/.ssh/ssh-key-2026-05-31-goldfish.key root@178.104.88.142 'hostname'   # → niels-server
-```
-
-Wil je een **nieuwe** sleutel gebruiken in plaats van de bestaande kopiëren:
+Liever een **nieuwe** sleutel dan de bestaande kopiëren:
 
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/goldfish-<machine>.key -C "goldfish deploy <machine>"
 # publieke deel toevoegen op de server (vanaf een machine die er al in kan):
-ssh -i ~/.ssh/ssh-key-2026-05-31-goldfish.key root@178.104.88.142 \
+ssh -i ~/.ssh/fedora-hetzner root@178.104.88.142 \
   "echo '<inhoud van goldfish-<machine>.key.pub>' >> /root/.ssh/authorized_keys"
 # en daarna deployen met:
 GOLDFISH_SSH_KEY=~/.ssh/goldfish-<machine>.key ./scripts/deploy.sh
 ```
 
-### 2. Een lokale `src/.env` — alleen om te ontwikkelen en te testen
-
-De productie-`.env` staat **uitsluitend op de server** en wordt door de rsync-excludes
-beschermd. Lokaal heb je een eigen `src/.env` nodig (kopie van `src/.env.example`) met:
-
-| Key | Lokaal | Opmerking |
-|---|---|---|
-| `DATABASE_URL` | je **lokale** postgres | `postgresql://goldfish:<lokaal-pw>@localhost:5432/goldfish` |
-| `JWT_SECRET` | zelf genereren | `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"` — hoeft níét gelijk te zijn aan productie |
-| `PORT` / `HOST` | `3000` / weglaten | lokaal juist niet op 127.0.0.1 vastzetten als je vanaf je telefoon test |
-| `TRUST_PROXY` | **weglaten** | alleen achter nginx; anders omzeilt iedereen de rate limiter met een verzonnen `X-Forwarded-For` |
-| `RESEND_API_KEY` | eigen key of dummy | zonder geldige key falen verificatie-/reset-mails (de rest werkt) |
-| `FROM_EMAIL`, `APP_URL` | lokale waarden | `APP_URL` bepaalt de links in mails |
-
-### 3. Tooling
-
-`node` 22, `npm`, `rsync`, `ssh`, `curl`, en een lokale PostgreSQL voor `npm test`.
-Voor de webfrontend bovendien Flutter — in WSL: **de Windows-flutter**, zie onder.
-
-### 4. Geheimen die alleen op de server (moeten blijven) staan
+### Geheimen die alleen op de server (moeten blijven) staan
 
 Voor het geval de server ooit opnieuw opgebouwd moet worden — dit is wat je dan terug moet
 hebben, en wat je dus ergens veilig bewaard wilt hebben:
@@ -136,20 +113,20 @@ bij (backend-repo én de Flutter-repo).
 Stap voor stap, zodat je weet wat het script doet (en het handmatig kunt overdoen):
 
 ```bash
-KEY=~/.ssh/ssh-key-2026-05-31-goldfish.key
+KEY=~/.ssh/fedora-hetzner        # of ~/.ssh/ssh-key-2026-05-31-goldfish.key
 SRV=root@178.104.88.142
 
 # 1. Welke migraties draaiden er al?
 ssh -i $KEY $SRV "sudo -u postgres psql -d goldfish -tAc \
   'SELECT version FROM schema_migrations ORDER BY version;'"
-#    001 en 002 zijn ouder dan deze tracking en staan er niet in — dat klopt.
+#    000 (dev-baseline), 001 en 002 horen hier NIET in te staan — dat klopt.
 
 # 2. Code overzetten. --exclude 'src/.env' is ESSENTIEEL (anders overschrijft je
 #    dev-.env de productiegeheimen). Excludes worden ook niet door --delete gewist,
 #    dus node_modules en de .env op de server blijven staan.
-rsync -az --delete --exclude node_modules --exclude .git --exclude test \
+rsync -az --delete --exclude node_modules --exclude .git --exclude test --exclude .claude \
   --exclude 'src/.env' --exclude '.env*' \
-  -e "ssh -i $KEY" ~/programming/goldfish/backend/ $SRV:/home/goldfish/backend/
+  -e "ssh -i $KEY" ~/projects/goldfish/backend/ $SRV:/home/goldfish/backend/
 ssh -i $KEY $SRV "chown -R goldfish:goldfish /home/goldfish/backend"
 
 # 3. Eerst een dump, dan de ontbrekende migraties — als postgres, want de tabellen
@@ -187,7 +164,10 @@ Andere server of sleutel? Alles is te overrulen met environment variables, bijv.
 
 ## Webfrontend deployen
 
-De Flutter-app staat in `/mnt/c/programming/goldfish/goldfish_v1` (de WSL-kopie is verouderd).
+De Flutter-app is een eigen repo (`goldfish-frontend`). Het script zoekt hem op
+`~/projects/goldfish/frontend` (Fedora) en anders op `/mnt/c/programming/goldfish/goldfish_v1`
+(oude WSL-laptop, waar de WSL-kopie verouderd is); een ander pad geef je mee met
+`GOLDFISH_FLUTTER_DIR`.
 
 ```bash
 ./scripts/deploy-web.sh --build     # bouwen én deployen (~8 min bouwen)
@@ -197,10 +177,16 @@ De Flutter-app staat in `/mnt/c/programming/goldfish/goldfish_v1` (de WSL-kopie 
 Handmatig komt dat neer op:
 
 ```bash
-# Bouwen MOET in WSL met de Windows-flutter: de Linux-flutter breekt op de
+FE=~/projects/goldfish/frontend        # op de oude laptop: /mnt/c/programming/goldfish/goldfish_v1
+
+# Op Linux gewoon de lokale flutter:
+cd $FE && flutter build web --release
+
+# In WSL MOET het de Windows-flutter zijn: de Linux-flutter breekt op de
 # Windows-paden in .dart_tool/package_config.json, en /mnt/c/.../flutter/bin/flutter
-# is vanuit WSL onbruikbaar (CRLF → "/usr/bin/env: 'bash\r'").
-cd /mnt/c/programming/goldfish/goldfish_v1 && cmd.exe /c "flutter build web --release"
+# is vanuit WSL onbruikbaar (CRLF → "/usr/bin/env: 'bash\r'"). Het script kiest
+# deze tak zelf zodra het pad met /mnt/c/ begint:
+cd $FE && cmd.exe /c "flutter build web --release"
 
 # Terugrolkopie — rsync draait met --delete, zonder kopie is de vorige build weg
 ssh -i $KEY $SRV "rm -rf /var/www/goldfish.bak-prev && cp -a /var/www/goldfish /var/www/goldfish.bak-prev"
@@ -214,7 +200,7 @@ over de versie:
 
 ```bash
 curl -s https://goldfishstudy.app/main.dart.js | md5sum
-md5sum /mnt/c/programming/goldfish/goldfish_v1/build/web/main.dart.js
+md5sum $FE/build/web/main.dart.js
 ```
 
 ---
@@ -267,7 +253,8 @@ ssh -i $KEY $SRV "sudo -u postgres psql -d goldfish -v ON_ERROR_STOP=1" < migrat
 
 ## Env-variabelen (`src/.env` op de server)
 
-Uitgangspunt is `src/.env.example`. In productie zijn deze cruciaal:
+Uitgangspunt is `.env.example` (in de repo-root; de app leest `src/.env`). In productie zijn
+deze cruciaal:
 
 - **`HOST=127.0.0.1`** — de app luistert dan alleen op loopback en is uitsluitend via nginx
   bereikbaar. Zonder deze regel bindt hij op `0.0.0.0`.

@@ -21,7 +21,15 @@
 set -euo pipefail
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-SSH_KEY="${GOLDFISH_SSH_KEY:-$HOME/.ssh/ssh-key-2026-05-31-goldfish.key}"
+# Elke dev-machine heeft zijn eigen sleutel voor dezelfde server; zonder
+# GOLDFISH_SSH_KEY pakken we de eerste die bestaat.
+SSH_KEY="${GOLDFISH_SSH_KEY:-}"
+if [[ -z "$SSH_KEY" ]]; then
+  for candidate in "$HOME/.ssh/fedora-hetzner" "$HOME/.ssh/ssh-key-2026-05-31-goldfish.key"; do
+    [[ -f "$candidate" ]] && { SSH_KEY="$candidate"; break; }
+  done
+  SSH_KEY="${SSH_KEY:-$HOME/.ssh/fedora-hetzner}"   # bestaat er geen: nette foutmelding hieronder
+fi
 SSH_TARGET="${GOLDFISH_SSH_TARGET:-root@178.104.88.142}"
 REMOTE_DIR="${GOLDFISH_REMOTE_DIR:-/home/goldfish/backend}"
 APP_USER="${GOLDFISH_APP_USER:-goldfish}"
@@ -30,10 +38,12 @@ DB_NAME="${GOLDFISH_DB:-goldfish}"
 API_URL="${GOLDFISH_API_URL:-https://api.goldfishstudy.app}"
 WEB_URL="${GOLDFISH_WEB_URL:-https://goldfishstudy.app}"
 
-# Migraties 001 en 002 zijn ouder dan de schema_migrations-tracking en staan
-# daarom niet in de tabel. Nooit automatisch (her)draaien — 002 mag maar één
-# keer draaien en zou tokens dubbel hashen.
-LEGACY_MIGRATIONS="001_progress_deleted_at 002_hash_verification_tokens"
+# Migraties die dit script NOOIT draait, ook al staan ze niet in schema_migrations:
+#   000  startschema voor een lege dev-database (zie DEV_SETUP.md). Productie heeft
+#        deze tabellen allang; draaien zou alleen maar "already exists" opleveren.
+#   001  ouder dan de schema_migrations-tracking.
+#   002  idem, en mag maar één keer draaien — nogmaals zou tokens dubbel hashen.
+NEVER_RUN="000_baseline 001_progress_deleted_at 002_hash_verification_tokens"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -112,7 +122,7 @@ for file in migrations/[0-9]*.sql; do
   version="$(basename "$file" .sql)"
   [[ "$version" == *_down ]] && continue
   grep -qx -- "$version" <<<"$applied" && continue
-  grep -qw -- "$version" <<<"$LEGACY_MIGRATIONS" && continue
+  grep -qw -- "$version" <<<"$NEVER_RUN" && continue
   pending+=("$file")
 done
 
@@ -128,7 +138,7 @@ fi
 if (( DRY_RUN )); then
   step "DRY RUN — rsync-verschillen (er wordt niets gewijzigd)"
   rsync -azn --delete --itemize-changes \
-    --exclude node_modules --exclude .git --exclude test \
+    --exclude node_modules --exclude .git --exclude test --exclude .claude \
     --exclude 'src/.env' --exclude '.env*' \
     -e "ssh -i $SSH_KEY" "$REPO_DIR/" "$SSH_TARGET:$REMOTE_DIR/"
   ok "Dry run klaar — niets gewijzigd."
@@ -147,8 +157,9 @@ step "4/7  Code overzetten (rsync)"
 # server; zonder deze regel overschrijft je dev-.env de productiegeheimen.
 # Excludes worden ook niet verwijderd door --delete, dus node_modules en de
 # .env op de server blijven staan.
+# .claude is machine-lokale agent-config en hoort niet op een productieserver.
 rsync -az --delete --info=stats1 \
-  --exclude node_modules --exclude .git --exclude test \
+  --exclude node_modules --exclude .git --exclude test --exclude .claude \
   --exclude 'src/.env' --exclude '.env*' \
   -e "ssh -i $SSH_KEY" "$REPO_DIR/" "$SSH_TARGET:$REMOTE_DIR/"
 remote "chown -R $APP_USER:$APP_USER $REMOTE_DIR"
@@ -176,7 +187,7 @@ fi
 # ── 6. DEPENDENCIES + RESTART ─────────────────────────────────────────────────
 step "6/7  Dependencies en herstart"
 # npm ci verwijdert node_modules en installeert exact de lockfile.
-remote "runuser -l $APP_USER -c 'cd ~/backend && npm ci --omit=dev --no-audit --no-fund'"
+remote "runuser -l $APP_USER -c 'cd $REMOTE_DIR && npm ci --omit=dev --no-audit --no-fund'"
 ok "Dependencies geïnstalleerd"
 
 # pm2 restart is veilig; de pm2-DAEMON nooit killen (dan faalt pm2-goldfish.service).

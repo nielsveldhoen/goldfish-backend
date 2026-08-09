@@ -9,6 +9,19 @@ in volgorde). Zie [../DEPLOY.md](../DEPLOY.md). Migratie 003 en hoger zijn trans
 zetten zelf hun rij in `schema_migrations`; **001 en 002 zijn ouder dan die tracking** en
 worden door het script overgeslagen — 002 mag maar één keer draaien.
 
+**Een lege database begint bij `000_baseline.sql`.** De migraties 001..024 bouwen voort op
+tabellen die ooit met de hand zijn aangemaakt; alleen `migrations/` draaien op een lege DB werkt
+dus niet. `000_baseline.sql` is een schema-only snapshot op het niveau van 024 (plus de
+`app_config`-rij uit 006 en de 22 rijen in `schema_migrations`), en is bedoeld als **vloer, niet
+als spiegel**: hij blijft op 024 staan en migratie 025+ draai je er gewoon overheen. Regenereren
+bij elke nieuwe migratie is niet nodig. Hij hoort alleen op een lege dev-database — `deploy.sh`
+slaat hem over (`NEVER_RUN`), en tweemaal draaien faalt op bestaande tabellen. Zie
+[../DEV_SETUP.md](../DEV_SETUP.md).
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f 000_baseline.sql
+```
+
 Handmatig (lokaal, of om een oude database bij te werken):
 
 ```bash
@@ -38,6 +51,7 @@ sudo -u postgres psql -d goldfish -f 022_subscriptions.sql
 
 | Bestand | Wat | Herhaalbaar? |
 |---|---|---|
+| `000_baseline.sql` | startschema voor een **lege dev-database**: alle 18 tabellen op het niveau van 024, de `app_config`-rij uit 006, en `schema_migrations` gevuld met 003..024. Geen data. Draait nooit op productie (`NEVER_RUN` in `deploy.sh`) | nee — alleen op een lege database |
 | `001_progress_deleted_at.sql` | `deleted_at`-kolom op `user_card_progress` (progress reset + sync) | ja, idempotent |
 | `002_hash_verification_tokens.sql` | bestaande verificatietokens sha256-hashen | **nee — precies één keer** |
 | `003_rename_ltm_remote_stm_stable_add_recent.sql` | LTM→remote, STM→stable, nieuwe `recent`-kolom; sync-triggers voor oude clients + `schema_migrations`-tabel | **nee — precies één keer** (rerun faalt veilig op `ADD COLUMN`) |
