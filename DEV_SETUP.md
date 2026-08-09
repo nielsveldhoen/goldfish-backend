@@ -138,9 +138,11 @@ Vul in `src/.env` in:
 
 ```bash
 npm test               # 295 tests over 49 suites
-npm run dev            # server op http://localhost:3000
+./scripts/dev.sh       # database + backend + webapp in één keer (zie DEPLOY.md, doel 1)
 curl -s localhost:3000/version
 ```
+
+Alleen de backend, zonder webapp: `npm run dev`.
 
 Dit is de echte verificatie van stap 4 en 5. Falen er tests met database-fouten (ontbrekende
 kolom of tabel), dan loopt je schema achter op de code: draai de migraties boven 024 na.
@@ -184,7 +186,8 @@ echo 'export GOLDFISH_SSH_KEY=$HOME/.ssh/<jouw-sleutel>' >> ~/.bashrc
 
 ## Achtergrond
 
-- [DEPLOY.md](DEPLOY.md) — server, deploy, rollback, backups, valkuilen
+- [DEPLOY.md](DEPLOY.md) — de drie doelen (lokaal, lokaal-met-productiedata, echt deployen),
+  plus server, rollback, backups en valkuilen
 - [BACKEND_API.md](BACKEND_API.md) — API-contract; **bij elke API-wijziging ook de kopie in de
   Flutter-repo bijwerken**
 - [migrations/README.md](migrations/README.md) — wat elke migratie doet en of hij herhaalbaar is

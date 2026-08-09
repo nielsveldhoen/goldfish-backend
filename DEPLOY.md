@@ -4,15 +4,122 @@ De productie draait sinds **16-07-2026 op Hetzner Cloud** (daarvóór Oracle Alw
 is verlaten na drie storingen in twee dagen). Backend achter **nginx**, met **pm2** als
 procesmanager; de webfrontend is een statische Flutter-build op dezelfde server.
 
-**De hele deploy zit in twee scripts:**
+## Er zijn drie doelen. Kies er één
+
+| Doel | Commando | Database | Raakt productie? |
+|---|---|---|---|
+| **1. Lokaal draaien** — ontwikkelen, testen, op je telefoon bekijken | `./scripts/dev.sh` | lege lokale DB (podman + `000_baseline.sql`) | nee |
+| **2. Lokaal draaien met echte data** — een bug reproduceren die alleen in jouw account optreedt | `./scripts/dev.sh --db remote` | **productie**, via SSH-tunnel | **ja, schrijvend** |
+| **3. Echt deployen** — de wereld ziet het | `./scripts/deploy.sh` + `./scripts/deploy-web.sh` | productie | **ja** |
+
+Doel 1 en 2 zetten dezelfde stapel op — database, backend op `:3000`, webapp op `:8090` — en
+verschillen alleen in waar de data vandaan komt. Doel 3 zet code op de server.
+
+Twijfel je? Begin bij doel 1. Nieuwe machine? Eerst **[DEV_SETUP.md](DEV_SETUP.md)**.
+
+---
+
+## Doel 1 — lokaal draaien (lege database)
+
+```bash
+./scripts/dev.sh                 # database + backend + webapp bouwen en serveren
+./scripts/dev.sh --no-build      # bestaande build/web hergebruiken (scheelt ~30 s)
+./scripts/dev.sh --status        # wat draait er, en op welke database
+./scripts/dev.sh --stop          # alles afsluiten
+```
+
+Wat het doet: een podman-container met PostgreSQL 18 starten en vullen met
+`migrations/000_baseline.sql`, `node src/index.js` op `0.0.0.0:3000` zetten, de Flutter-webapp
+bouwen en op `:8090` serveren, en tot slot controleren of `/version` antwoordt en of CORS klopt.
+
+De database is **leeg** — geen accounts, geen decks. Registreren kan, maar inloggen eist een
+geverifieerd e-mailadres, en zonder geldige `RESEND_API_KEY` komt die mail nooit aan. Keur
+daarom met de hand goed:
+
+```bash
+podman exec goldfish-db psql -U postgres -d goldfish \
+  -c "UPDATE users SET email_verified = true WHERE email = 'jouw@adres';"
+```
+
+De container draait met `--rm`: na `--stop` of een reboot is je lokale data weg en laadt het
+script de baseline opnieuw. Dat is de bedoeling — het is een wegwerpdatabase.
+
+### Op je telefoon of tablet bekijken
+
+De webapp is een statische build op `:8090` en de API zit op `:3000`; over Tailscale zijn die
+allebei te bereiken, maar Chrome upgradet een getypte hostname naar `https` en dan struikelt
+hij over de kale http-server. Publiceer ze daarom met een echt certificaat via
+`tailscale serve` (eenmalig, vraagt sudo):
+
+```bash
+sudo tailscale serve --bg --https=443   http://127.0.0.1:8090   # de webapp
+sudo tailscale serve --bg --https=10000 http://127.0.0.1:3000   # de API
+tailscale serve status                                          # controleren
+```
+
+Daarna is het op elk device in je tailnet **`https://<machine>.<tailnet>.ts.net`**. `dev.sh`
+detecteert deze mappings zelf en bakt de juiste API-URL in de build; ontbreken ze, dan bouwt
+het script voor `localhost` en zegt het welke commando's je nodig hebt.
+
+Twee dingen die hierbij fout kunnen gaan:
+
+- **De API-URL zit vast in de build.** `API_BASE_URL` is een compile-time `--dart-define`.
+  Verander je poort of hostnaam, dan moet je opnieuw bouwen (dus geen `--no-build`).
+- **CORS.** Een tailnet-origin is geen localhost en wordt dus niet automatisch toegestaan; hij
+  moet in `CORS_ORIGINS` in `src/.env`. `dev.sh` controleert dit met een preflight en klaagt
+  als het niet klopt.
+
+---
+
+## Doel 2 — lokaal draaien tegen de productiedatabase
+
+```bash
+./scripts/dev.sh --db remote
+```
+
+Hetzelfde als doel 1, maar de backend praat via een SSH-tunnel (`127.0.0.1:5433`) met de
+productie-DB. Je logt in met je echte account en ziet je echte decks. Het wachtwoord wordt bij
+het starten uit de server-`src/.env` gelezen en leeft alleen in de environment van dat proces —
+het komt niet op schijf en niet in je lokale `.env`.
+
+**Wat je in de app doet, is een echte wijziging.** Een deck verwijderen is een deck verwijderen.
+Er zit geen vangnet tussen; gebruik dit om te kíjken, niet om te experimenteren.
+
+Het script zet `DISABLE_BACKGROUND_JOBS=1`, waardoor `src/index.js` de dagelijkse
+`purgeDeletedAccounts` en `purgeTombstones` overslaat. Die hard-deleten rijen, en dat hoort de
+server zelf te doen — niet een tweede instance op een laptop. Controleer in
+`/tmp/goldfish-dev/backend.log` dat er "achtergrondjobs uitgeschakeld" staat.
+
+Twijfel je of je op de goede database zit? `./scripts/dev.sh --status` toont het, en `/version`
+verraadt het ook: `min_client_build` is `0` op de lokale baseline en `8` op productie.
+
+Wil je je echte data zonder het risico, dan is het alternatief een dump naar de lokale
+container. Dat haalt wel productiedata naar je machine — zie de grenzen in DEV_SETUP.md.
+
+---
+
+## Doel 3 — echt deployen
 
 ```bash
 ./scripts/deploy.sh          # backend: tests → rsync → migraties → npm ci → pm2 restart → healthcheck
 ./scripts/deploy-web.sh      # webfrontend: build/web/ → /var/www/goldfish (met terugrolkopie)
 ```
 
-Draai eerst `./scripts/deploy.sh --dry-run` als je wilt zien wat er zou gebeuren; dat wijzigt
-niets op de server. Nieuwe machine? Begin bij **[DEV_SETUP.md](DEV_SETUP.md)**.
+Draai eerst `./scripts/deploy.sh --dry-run`; dat toont de migratiestand en de rsync-verschillen
+en wijzigt niets op de server. De rest van dit document beschrijft deze twee scripts: wat ze
+stap voor stap doen, hoe je terugrolt, en welke valkuilen eerder zijn misgegaan.
+
+**Let op bij de webdeploy:** `deploy-web.sh` zet de build uit `build/web/` op de server. Heb je
+daar net met `dev.sh` een build in gezet die naar je laptop wijst, dan zou je die naar productie
+sturen. Bouw daarom altijd opnieuw zonder `--dart-define`, of met de productie-URL:
+
+```bash
+cd ~/projects/goldfish/frontend
+flutter build web --release        # zonder dart-define ⇒ https://api.goldfishstudy.app
+cd ~/projects/goldfish/backend && ./scripts/deploy-web.sh
+```
+
+`deploy-web.sh --build` doet precies dat: bouwen zonder overrides, en dan deployen.
 
 ---
 

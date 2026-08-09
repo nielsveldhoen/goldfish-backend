@@ -37,6 +37,7 @@ fi
 WEB_ROOT="${GOLDFISH_WEB_ROOT:-/var/www/goldfish}"
 WEB_OWNER="${GOLDFISH_WEB_OWNER:-goldfish:goldfish}"
 WEB_URL="${GOLDFISH_WEB_URL:-https://goldfishstudy.app}"
+API_URL="${GOLDFISH_API_URL:-https://api.goldfishstudy.app}"   # hoort in de build te staan
 
 DRY_RUN=0
 DO_BUILD=0
@@ -84,6 +85,20 @@ fi
 BUILD_DIR="$FLUTTER_DIR/build/web"
 [[ -f "$BUILD_DIR/main.dart.js" ]] || die "Geen build gevonden in $BUILD_DIR — draai eerst met --build."
 info "build: $BUILD_DIR ($(date -r "$BUILD_DIR/main.dart.js" '+%Y-%m-%d %H:%M'))"
+
+# Wijst deze build wel naar de productie-API? scripts/dev.sh bouwt met een
+# --dart-define naar een tailnet- of localhost-adres; zo'n build op productie
+# zetten geeft een site die de API van iemands laptop probeert te bereiken.
+dev_url="$(grep -oE 'https?://(localhost|127\.0\.0\.1|[a-z0-9-]+\.[a-z0-9-]+\.ts\.net)(:[0-9]+)?' \
+  "$BUILD_DIR/main.dart.js" | sort -u | head -3 | tr '\n' ' ')"
+if [[ -n "$dev_url" ]]; then
+  die "Deze build wijst naar een dev-adres: $dev_url
+    Dat is een build van scripts/dev.sh. Bouw opnieuw voor productie:
+        $0 --build
+    (of handmatig: cd $FLUTTER_DIR && flutter build web --release, zónder --dart-define)"
+fi
+grep -q "$API_URL" "$BUILD_DIR/main.dart.js" \
+  || warn "De productie-API-URL ($API_URL) staat niet in de build. Controleer dit vóór je doorgaat."
 
 local_md5="$(md5sum "$BUILD_DIR/main.dart.js" | cut -d' ' -f1)"
 info "lokale main.dart.js md5: $local_md5"
