@@ -89,8 +89,11 @@ info "build: $BUILD_DIR ($(date -r "$BUILD_DIR/main.dart.js" '+%Y-%m-%d %H:%M'))
 # Wijst deze build wel naar de productie-API? scripts/dev.sh bouwt met een
 # --dart-define naar een tailnet- of localhost-adres; zo'n build op productie
 # zetten geeft een site die de API van iemands laptop probeert te bereiken.
+# `|| true`: grep geeft exit 1 als het niets vindt — een schone build dus — en
+# met pipefail zou set -e de deploy daar zonder een woord afbreken. Precies
+# andersom als bedoeld: de dev-build kwam er langs, de goede build niet.
 dev_url="$(grep -oE 'https?://(localhost|127\.0\.0\.1|[a-z0-9-]+\.[a-z0-9-]+\.ts\.net)(:[0-9]+)?' \
-  "$BUILD_DIR/main.dart.js" | sort -u | head -3 | tr '\n' ' ')"
+  "$BUILD_DIR/main.dart.js" | sort -u | head -3 | tr '\n' ' ' || true)"
 if [[ -n "$dev_url" ]]; then
   die "Deze build wijst naar een dev-adres: $dev_url
     Dat is een build van scripts/dev.sh. Bouw opnieuw voor productie:
