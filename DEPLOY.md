@@ -44,30 +44,8 @@ podman exec goldfish-db psql -U postgres -d goldfish \
 De container draait met `--rm`: na `--stop` of een reboot is je lokale data weg en laadt het
 script de baseline opnieuw. Dat is de bedoeling — het is een wegwerpdatabase.
 
-### Op je telefoon of tablet bekijken
-
-De webapp is een statische build op `:8090` en de API zit op `:3000`; over Tailscale zijn die
-allebei te bereiken, maar Chrome upgradet een getypte hostname naar `https` en dan struikelt
-hij over de kale http-server. Publiceer ze daarom met een echt certificaat via
-`tailscale serve` (eenmalig, vraagt sudo):
-
-```bash
-sudo tailscale serve --bg --https=443   http://127.0.0.1:8090   # de webapp
-sudo tailscale serve --bg --https=10000 http://127.0.0.1:3000   # de API
-tailscale serve status                                          # controleren
-```
-
-Daarna is het op elk device in je tailnet **`https://<machine>.<tailnet>.ts.net`**. `dev.sh`
-detecteert deze mappings zelf en bakt de juiste API-URL in de build; ontbreken ze, dan bouwt
-het script voor `localhost` en zegt het welke commando's je nodig hebt.
-
-Twee dingen die hierbij fout kunnen gaan:
-
-- **De API-URL zit vast in de build.** `API_BASE_URL` is een compile-time `--dart-define`.
-  Verander je poort of hostnaam, dan moet je opnieuw bouwen (dus geen `--no-build`).
-- **CORS.** Een tailnet-origin is geen localhost en wordt dus niet automatisch toegestaan; hij
-  moet in `CORS_ORIGINS` in `src/.env`. `dev.sh` controleert dit met een preflight en klaagt
-  als het niet klopt.
+Wil je het op je telefoon of tablet bekijken: zie **[Testrun via Tailscale](#testrun-via-tailscale)**
+hieronder. Dat werkt hetzelfde voor doel 1 en doel 2.
 
 ---
 
@@ -95,6 +73,105 @@ verraadt het ook: `min_client_build` is `0` op de lokale baseline en `8` op prod
 
 Wil je je echte data zonder het risico, dan is het alternatief een dump naar de lokale
 container. Dat haalt wel productiedata naar je machine — zie de grenzen in DEV_SETUP.md.
+
+---
+
+## Testrun via Tailscale
+
+Zo bekijk je een draaiende testrun op je telefoon of tablet. Geldt voor doel 1 én doel 2 — de
+stapel is dezelfde, alleen de database verschilt.
+
+**Waarom niet gewoon het IP-adres?** De webapp draait op een kale `python3 -m http.server`.
+Chrome upgradet een getypte hostname naar `https` en struikelt dan over die http-server, en op
+een kale-IP-http-pagina is `crypto.subtle` er niet — dan gooit `flutter_secure_storage` vóór
+`runApp` en krijg je een wit scherm. `tailscale serve` lost allebei op: een echt
+Let's Encrypt-certificaat op een MagicDNS-naam, alleen binnen je tailnet.
+
+### Eenmalig: de twee serve-mappings
+
+```bash
+sudo tailscale serve --bg --https=443   http://127.0.0.1:8090   # de webapp
+sudo tailscale serve --bg --https=10000 http://127.0.0.1:3000   # de API
+tailscale serve status                                          # controleren
+```
+
+`--bg` overleeft een reboot, dus dit doe je één keer per machine. Op Fedora staat het al:
+
+```
+https://fedora.tail556dec.ts.net        → 127.0.0.1:8090
+https://fedora.tail556dec.ts.net:10000  → 127.0.0.1:3000
+```
+
+De API-poort is `10000` omdat `dev.sh` daarop detecteert (`GOLDFISH_TS_API_PORT`). Kies je een
+andere, geef die dan bij élke `dev.sh`-aanroep mee — anders vindt het script de mapping niet.
+
+Zet de tailnet-origin ook in `CORS_ORIGINS` in `src/.env`; localhost is altijd toegestaan, een
+tailnet-hostnaam niet. Op Fedora staat er:
+
+```
+CORS_ORIGINS=https://fedora.tail556dec.ts.net,http://fedora.tail556dec.ts.net:8090,http://100.81.186.114:8090
+```
+
+### Elke testrun
+
+```bash
+cd ~/projects/goldfish/backend
+./scripts/dev.sh                 # lege lokale database
+./scripts/dev.sh --db remote     # of: de echte data — dan zijn het echte wijzigingen
+```
+
+**Kijk naar deze regel in stap 3/4 en niets anders:**
+
+```
+    API_BASE_URL in de build: https://fedora.tail556dec.ts.net:10000     ← goed
+    API_BASE_URL in de build: http://localhost:3000                      ← alleen deze machine
+```
+
+Staat er `localhost`, dan vond het script geen serve-mapping op `:10000` en is de build
+onbruikbaar op je tablet. Herstel de mapping en draai `dev.sh` opnieuw **zonder** `--no-build`.
+
+Daarna open je op het device: **`https://fedora.tail556dec.ts.net`** — en **hard refreshen**.
+De browser houdt `main.dart.js` vast en serveert anders stilletjes de vorige build. Op een
+tablet is het tabblad sluiten en opnieuw openen het betrouwbaarst.
+
+Een build met de tailnet-URL werkt óók gewoon op `http://localhost:8090` op deze machine: een
+http-pagina mag een https-API aanroepen, en beide origins staan in CORS. Andersom niet. Bouw
+dus altijd voor de tailnet-URL, ook als je zelf op je laptop kijkt.
+
+### Controleren zonder de app te openen
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/                          # 200
+curl -s -o /dev/null -w '%{http_code}\n' https://fedora.tail556dec.ts.net/               # 200
+curl -s -o /dev/null -w '%{http_code}\n' https://fedora.tail556dec.ts.net:10000/version  # 200
+grep -c 'fedora.tail556dec.ts.net:10000' ~/projects/goldfish/frontend/build/web/main.dart.js
+```
+
+Die laatste is de beslissende: staat het getal op `0`, dan zit de verkeerde API-URL in de build,
+wat de HTTP 200'en er ook van vinden.
+
+```bash
+./scripts/dev.sh --status        # wat draait er, en op welke database
+./scripts/dev.sh --stop          # alles afsluiten (tunnel, backend, webserver)
+tail -f /tmp/goldfish-dev/backend.log
+```
+
+### Valkuilen
+
+- **De app laadt, maar er is niks te zien — geen decks, geen kaarten.** Bijna altijd een build
+  met `API_BASE_URL=http://localhost:3000` die je op een ánder device opent: de app zoekt de API
+  dan op de localhost van de tablet. Bewijs staat in `/tmp/goldfish-dev/backend.log` — alleen
+  `GET /version` (dat is de webserver zelf), geen login en geen `/v2/decks`. Opnieuw bouwen.
+- **`GOLDFISH_TS_API_PORT=<ongebruikte poort>`** forceert de localhost-tak van `dev.sh`. Handig
+  als je expres alleen op deze machine wilt draaien, maar het breekt elk ander device. Gebruik
+  het bewust, en bouw daarna opnieuw.
+- **`--no-build` na een URL-wissel.** `API_BASE_URL` is een compile-time `--dart-define`; een
+  hergebruikte build houdt de oude URL vast. Het script waarschuwt, maar gaat wél door.
+- **Deze build nooit deployen.** In `build/web/` staat nu een app die naar je laptop wijst.
+  `deploy-web.sh` zou die naar productie sturen — bouw eerst opnieuw zonder `--dart-define`, of
+  gebruik `deploy-web.sh --build`.
+- **Tailscale down of uitgelogd op het device.** `tailscale status` op beide kanten; de
+  serve-mappings zijn tailnet-only en dus onbereikbaar vanaf een normaal netwerk.
 
 ---
 
