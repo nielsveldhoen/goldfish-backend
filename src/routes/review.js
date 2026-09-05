@@ -417,6 +417,64 @@ router.delete("/progress/:card_id", authMiddleware, async (req, res) => {
   }
 });
 
+// ============================================
+// RESET PROGRESS VOOR IEDEREEN OP DE KAART
+// ============================================
+// De vraag zelf is veranderd, dus de statistieken van álle deelnemers slaan
+// nergens meer op — niet alleen die van de bewerker. Vereist bewerkrecht op het
+// deck: hetzelfde recht dat nodig was om de vraag aan te passen. Verder
+// identiek aan de reset hierboven: de rijen gaan op deleted_at, en elk getroffen
+// account krijgt zijn eigen progress_deleted binnen zodat zijn client de kaart
+// lokaal op nul zet.
+router.delete("/progress/:card_id/all", authMiddleware, async (req, res) => {
+  const { card_id } = req.params;
+
+  if (!isUUID(card_id)) {
+    return res.status(404).json({ error: "Card not found" });
+  }
+
+  try {
+    const cardCheck = await pool.query(
+      `SELECT ${canReadDeckSql("d", "$2")} AS can_read,
+              ${canEditDeckSql("d", "$2")} AS can_edit
+       FROM cards c
+       JOIN decks d ON c.deck_id = d.id
+       WHERE c.id = $1 AND c.deleted_at IS NULL AND d.deleted_at IS NULL`,
+      [card_id, req.user.id]
+    );
+
+    // Zonder leestoegang bestaat de kaart niet, ook niet als 403: wie het deck
+    // niet heeft hoort er niets over te weten.
+    if (cardCheck.rowCount === 0 || !cardCheck.rows[0].can_read) {
+      return res.status(404).json({ error: "Card not found" });
+    }
+
+    if (!cardCheck.rows[0].can_edit) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+
+    const result = await pool.query(
+      `UPDATE user_card_progress
+       SET deleted_at = NOW()
+       WHERE card_id = $1 AND deleted_at IS NULL
+       RETURNING *`,
+      [card_id]
+    );
+
+    for (const row of result.rows) {
+      broadcast(row.user_id, "progress_deleted", row);
+    }
+
+    // Idempotent: ook 200 als niemand (nog) voortgang op de kaart had.
+    res.json({ message: "Progress reset", affected: result.rowCount });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
 router.get("/decks/summary", authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(

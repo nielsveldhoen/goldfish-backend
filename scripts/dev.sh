@@ -254,7 +254,12 @@ fi
 info "API_BASE_URL in de build: $API_BASE_URL"
 
 if (( DO_BUILD )); then
-  ( cd "$FLUTTER_DIR" && flutter build web --release \
+  # --pwa-strategy=none: geen service worker. Die cachet index.html, en dan
+  # krijg je op je telefoon of tablet een oude versie te zien terwijl je denkt
+  # dat je de nieuwe test — vooral vervelend bij wijzigingen in index.html zelf,
+  # want daar zit de service worker precies voor. Voor een testrun wil je altijd
+  # zien wat er nu gebouwd is; deploy-web.sh laat de service worker staan.
+  ( cd "$FLUTTER_DIR" && flutter build web --release --pwa-strategy=none \
       --dart-define=API_BASE_URL="$API_BASE_URL" ) >"$RUN_DIR/build.log" 2>&1 \
     || die "flutter build web faalde. Log: $RUN_DIR/build.log"
   info "gebouwd"

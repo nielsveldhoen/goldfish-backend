@@ -800,6 +800,26 @@ Een nieuwe review van dezelfde kaart (POST `/review/progress`) maakt het record 
 
 ---
 
+### DELETE `/review/progress/:card_id/all` 🔒
+Zelfde reset, maar voor **iedereen die het deck heeft** — de eigenaar en alle actieve recipients. Bedoeld voor het moment dat de vraag inhoudelijk verandert: de statistieken van alle deelnemers slaan dan nergens meer op.
+
+Vereist **bewerkrecht** op het deck (`can_edit`) — hetzelfde recht dat nodig is om de vraag zelf aan te passen. Idempotent: ook zonder actieve voortgangsrecords is de response `200`.
+
+**Response `200`:**
+```json
+{ "message": "Progress reset", "affected": 3 }
+```
+
+`affected` = het aantal voortgangsrecords dat is gereset (over alle gebruikers heen).
+
+**Foutcodes:**
+- `403` — wel leestoegang tot het deck, geen bewerkrecht
+- `404` — kaart bestaat niet, of de gebruiker heeft geen leestoegang
+
+**Sync naar andere apparaten:** identiek aan de reset hierboven, maar per getroffen gebruiker: elk record krijgt `deleted_at` en verschijnt in díe gebruiker zijn `/sync/changes`; elk getroffen account krijgt realtime zijn eigen `progress_deleted`-event.
+
+---
+
 ### GET `/review/core/summary`
 Overzicht van alle core-kaarten (`is_core = true`) van de gebruiker (over alle decks). Kaarten uit **inactieve** decks (`inactive = true`) en uit soft-deleted decks tellen **niet** mee. `core_only` speelt hier geen rol.
 
@@ -1682,7 +1702,7 @@ Bulk-endpoints sturen dus **één** event met alle items in de array (geen event
 | `card_updated`    | PUT `/cards/:id`                     | bijgewerkte kaart-objecten       |
 | `card_deleted`    | DELETE `/cards/:id` of POST `/cards/bulk-delete` (één event voor de hele batch) | `{ "id": "uuid", "deck_id": "uuid", "deleted_at": "…" }` |
 | `core_set`        | POST `/review/progress` (modus 2)    | voortgangsobjecten               |
-| `progress_deleted`| DELETE `/review/progress/:card_id`   | voortgangsobjecten (met `deleted_at` gezet) |
+| `progress_deleted`| DELETE `/review/progress/:card_id` (+ `/all`) | voortgangsobjecten (met `deleted_at` gezet) |
 | `contact_invited` | POST `/contacts`                     | contact-object (perspectief per ontvangende gebruiker) |
 | `contact_accepted`| POST `/contacts/:id/accept`          | contact-object (`accepted`, perspectief per ontvanger) |
 | `contact_rejected`| DELETE `/contacts/:id`               | `{ "id": "<relatie-id>" }`       |
