@@ -1,12 +1,8 @@
-import pkg from "pg";
-import { readFileSync } from "fs";
-
-const { Pool, types } = pkg;
-types.setTypeParser(1082, (val) => val);
-
-const pool = new Pool({
-  connectionString: "postgresql://goldfish:Pgewoonzo1S@localhost:5432/goldfish",
-});
+// Dezelfde pool als de rest van de backend, dus dezelfde DATABASE_URL uit
+// src/.env — en niet een connectionstring in dit bestand. De DATE-parser die
+// dit script nodig heeft zit al in src/db.js.
+import "../src/config/env.js";
+import { pool } from "../src/db.js";
 
 // ── log parser (port van Dart RepetitionService) ───────────────────────────
 
