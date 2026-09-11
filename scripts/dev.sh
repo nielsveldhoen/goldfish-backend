@@ -99,7 +99,9 @@ kill_backend() {
 stop_all() {
   step "Afsluiten"
   kill_backend
-  pkill -f "http.server $WEB_PORT" 2>/dev/null && info "webserver gestopt" || info "webserver draaide niet"
+  pkill -f "serve_web.py $WEB_PORT" 2>/dev/null \
+    || pkill -f "http.server $WEB_PORT" 2>/dev/null \
+    && info "webserver gestopt" || info "webserver draaide niet"
   pkill -f "L $TUNNEL_PORT:127.0.0.1:5432" 2>/dev/null && info "SSH-tunnel gesloten" || true
   if podman container exists "$DB_CONTAINER" 2>/dev/null; then
     podman stop "$DB_CONTAINER" >/dev/null && info "database gestopt (data is weg: --rm)"
@@ -269,8 +271,12 @@ else
   warn "Build hergebruikt; als die met een andere API_BASE_URL is gemaakt, klopt hij niet."
 fi
 
+# serve_web.py in plaats van `python3 -m http.server`: die laatste stuurt geen
+# Cache-Control, en dan hergebruikt je browser main.dart.js uit zijn cache
+# terwijl je denkt de nieuwe build te bekijken.
+pkill -f "serve_web.py $WEB_PORT" 2>/dev/null || true
 pkill -f "http.server $WEB_PORT" 2>/dev/null || true
-( cd "$FLUTTER_DIR/build/web" && nohup python3 -m http.server "$WEB_PORT" --bind 0.0.0.0 \
+( nohup python3 "$REPO_DIR/scripts/serve_web.py" "$WEB_PORT" "$FLUTTER_DIR/build/web" \
     >"$RUN_DIR/web.log" 2>&1 & ) >/dev/null 2>&1 </dev/null
 sleep 1
 curl -s -o /dev/null --max-time 5 "http://127.0.0.1:$WEB_PORT/" || die "Webserver antwoordt niet."
