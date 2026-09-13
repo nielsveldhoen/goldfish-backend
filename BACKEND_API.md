@@ -357,7 +357,13 @@ Nieuw deck aanmaken.
 ```
 
 **Foutcodes:**
-- `400` — titel ontbreekt, veld boven de maximale lengte, of veld van het verkeerde type (tags geen string-array, is_public/inactive/core_only geen boolean)
+- `400` — titel ontbreekt, veld boven de maximale lengte, veld met een nulbyte erin, of veld van het verkeerde type (tags geen string-array, is_public/inactive/core_only geen boolean)
+
+> **Nulbytes.** Geen enkel tekstveld mag een nulbyte (`\u0000`) bevatten: Postgres
+> weigert die in een text-kolom. Zulke invoer krijgt een `400`
+> (`"<veld> must not contain null bytes"`) en niet een `500`. Dat verschil is er
+> voor de client: op een `500` blijft een schrijfwachtrij het opnieuw proberen,
+> op een `400` laat hij de rij vallen en gaat door.
 
 ---
 
@@ -386,7 +392,7 @@ Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie
 **Response `200`:** bijgewerkt deck-object
 
 **Foutcodes:**
-- `400` — veld boven de maximale lengte of van het verkeerde type (zelfde limieten als `POST /decks`), of `{ "error": "is_public_irreversible" }` bij `is_public: false` op een publiek deck
+- `400` — veld boven de maximale lengte, veld met een nulbyte erin, of veld van het verkeerde type (zelfde limieten als `POST /decks`), of `{ "error": "is_public_irreversible" }` bij `is_public: false` op een publiek deck
 - `404` — deck niet gevonden (ook bij een malformed id)
 - `409` — conflict: de server heeft een nieuwere versie
   ```json
@@ -501,7 +507,7 @@ Nieuwe kaart aanmaken.
 **Response `201`:** kaart-object
 
 **Foutcodes:**
-- `400` — ontbrekende velden of vraag/antwoord boven de maximale lengte
+- `400` — ontbrekende velden, vraag/antwoord boven de maximale lengte, of een nulbyte in vraag of antwoord
 - `403` — geen schrijfrecht op dit deck: geen eigenaar en geen `can_edit` (ook bij een malformed deck_id)
 
 ---
@@ -527,7 +533,7 @@ Per kaart is `created_at` optioneel, met exact dezelfde semantiek als bij `POST 
 > **Volgorde-garantie (hard contract):** de response-array heeft altijd exact dezelfde volgorde als de `cards`-array in de request. De client mag dus op index zijn lokale temp-ids aan de server-ids koppelen.
 
 **Foutcodes:**
-- `400` — ontbrekende velden, lege cards-array, meer dan 500 kaarten, of een vraag/antwoord boven de maximale lengte (max 10000 tekens; de hele batch wordt dan geweigerd)
+- `400` — ontbrekende velden, lege cards-array, meer dan 500 kaarten, of een vraag/antwoord boven de maximale lengte of met een nulbyte erin (max 10000 tekens; de hele batch wordt dan geweigerd)
 - `403` — geen schrijfrecht op dit deck: geen eigenaar en geen `can_edit` (ook bij een malformed deck_id)
 
 ---
@@ -549,7 +555,7 @@ Als `client_updated_at` meegestuurd wordt en de server heeft een nieuwere versie
 **Response `200`:** bijgewerkt kaart-object
 
 **Foutcodes:**
-- `400` — vraag/antwoord boven de maximale lengte (max 10000 tekens)
+- `400` — vraag/antwoord boven de maximale lengte (max 10000 tekens) of met een nulbyte erin
 - `404` — kaart niet gevonden (ook bij een malformed id)
 - `409` — conflict: de server heeft een nieuwere versie
   ```json

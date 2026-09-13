@@ -157,6 +157,55 @@ describe("inputbegrenzing cards", () => {
   });
 });
 
+describe("nulbytes", () => {
+  // Postgres weigert een nulbyte in een text-kolom met 22021, en die strandde
+  // als 500. Op een 500 blijft de schrijfwachtrij van de client het eeuwig
+  // opnieuw proberen, met alles wat erachter staat erbij — één nulbyte uit een
+  // geimporteerd bestand zette zo de synchronisatie stil. Het hoort een 400 te
+  // zijn, want de invoer is fout en niet de server.
+  const NUL = String.fromCharCode(0);
+
+  test("nulbyte in een kaartveld -> 400, niet 500", async () => {
+    const { user, token } = await freshUser();
+    const deck = await createDeck(user.id);
+
+    const single = await auth(request(app).post("/v2/cards"), token)
+      .send({ deck_id: deck.id, question: `a${NUL}b`, answer: "goed" });
+    assert.equal(single.status, 400);
+    assert.match(single.body.error, /null bytes/i);
+
+    const bulk = await auth(request(app).post("/v2/cards/bulk"), token)
+      .send({ deck_id: deck.id, cards: [{ question: "q", answer: `c${NUL}d` }] });
+    assert.equal(bulk.status, 400);
+
+    const card = await createCard(deck.id);
+    const put = await auth(request(app).put(`/v2/cards/${card.id}`), token)
+      .send({ answer: `x${NUL}y` });
+    assert.equal(put.status, 400);
+  });
+
+  test("nulbyte in een decktitel of tag -> 400", async () => {
+    const { token } = await freshUser();
+
+    const title = await auth(request(app).post("/v2/decks"), token)
+      .send({ title: `Frans${NUL}` });
+    assert.equal(title.status, 400);
+
+    const tag = await auth(request(app).post("/v2/decks"), token)
+      .send({ title: "Frans", tags: ["ok", `sch${NUL}ool`] });
+    assert.equal(tag.status, 400);
+    assert.match(tag.body.error, /null bytes/i);
+  });
+
+  test("gewone tekst blijft gewoon werken", async () => {
+    const { user, token } = await freshUser();
+    const deck = await createDeck(user.id);
+    const res = await auth(request(app).post("/v2/cards"), token)
+      .send({ deck_id: deck.id, question: "Wat is appel?", answer: "pomme" });
+    assert.equal(res.status, 201);
+  });
+});
+
 describe("inputbegrenzing review/progress", () => {
   test("score buiten smallint-range → 400 (geen 22003 → 500)", async () => {
     const { user, token } = await freshUser();

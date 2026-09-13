@@ -34,6 +34,18 @@ export const LIMITS = {
 const SMALLINT_MIN = -32768;
 const SMALLINT_MAX = 32767;
 
+// Postgres weigert een nulbyte in elke text-kolom: de insert faalt met 22021
+// en de route antwoordt 500. Dat is de verkeerde melding — de invoer is fout,
+// niet de server — en hij is ook schadelijk: de schrijfwachtrij van de client
+// ziet een 500 als "tijdelijk" en blijft het eeuwig opnieuw proberen, met alles
+// wat erachter staat erbij. Eén nulbyte uit een geïmporteerd bestand zette zo
+// de synchronisatie stil. Een 400 laat de client de rij laten vallen en door.
+// De client schoont dit al op (zie `sanitizeImported` in de frontend); dit is
+// het vangnet voor oudere clients en voor wie rechtstreeks tegen de API praat.
+function hasNullByte(value) {
+  return value.includes("\u0000");
+}
+
 // `required` = veld moet aanwezig én niet-leeg zijn; anders is undefined/null
 // toegestaan (partial updates).
 export function invalidString(value, name, max, { required = false } = {}) {
@@ -43,6 +55,7 @@ export function invalidString(value, name, max, { required = false } = {}) {
   if (typeof value !== "string") return `${name} must be a string`;
   if (required && value.length === 0) return `${name} is required`;
   if (value.length > max) return `${name} too long (max ${max} characters)`;
+  if (hasNullByte(value)) return `${name} must not contain null bytes`;
   return null;
 }
 
@@ -63,6 +76,7 @@ export function invalidTags(tags) {
     if (tag.length > LIMITS.TAG_MAX) {
       return `Tag too long (max ${LIMITS.TAG_MAX} characters)`;
     }
+    if (hasNullByte(tag)) return "Tag must not contain null bytes";
   }
   return null;
 }
