@@ -45,7 +45,8 @@ router.post("/update", authMiddleware, async (req, res) => {
     typeof deck_delta === "object" && !Array.isArray(deck_delta)
       ? invalidStatsFields(
           deck_delta,
-          ["cards_practiced", "cards_correct_first_try", "core_cards_practiced", "core_correct_first_try"],
+          ["cards_practiced", "cards_correct_first_try", "core_cards_practiced", "core_correct_first_try",
+           "cards_added", "cards_removed"],
           ["total_cards", "total_core_cards"],
           ["avg_remote_score", "avg_stable_score", "avg_recent_score",
            "avg_core_remote_score", "avg_core_stable_score", "avg_core_recent_score"],
@@ -81,6 +82,12 @@ router.post("/update", authMiddleware, async (req, res) => {
     cards_correct_first_try = 0,
     core_cards_practiced = 0,
     core_correct_first_try = 0,
+    // Kaartmutaties van deze dag: optelbare tellers, net als de oefentellers
+    // hierboven. Een gereset kaart stuurt de client als beide (hij verlaat de
+    // geoefende verzameling en komt als nieuwe kaart terug), zodat de grafiek
+    // een scoredaling kan verklaren zonder naar een netto verschil te kijken.
+    cards_added = 0,
+    cards_removed = 0,
     // Absolute deckgroottes (overschrijven; weglaten = onveranderd, zoals de avg_*).
     total_cards: deck_total_cards = null,
     total_core_cards: deck_total_core_cards = null,
@@ -110,13 +117,16 @@ router.post("/update", authMiddleware, async (req, res) => {
          (user_id, deck_id, date, cards_practiced, cards_correct_first_try, core_cards_practiced, core_correct_first_try,
           total_cards, total_core_cards,
           avg_remote_score, avg_stable_score, avg_recent_score,
-          avg_core_remote_score, avg_core_stable_score, avg_core_recent_score)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+          avg_core_remote_score, avg_core_stable_score, avg_core_recent_score,
+          cards_added, cards_removed)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
        ON CONFLICT (user_id, deck_id, date) DO UPDATE SET
          cards_practiced          = deck_stats.cards_practiced          + EXCLUDED.cards_practiced,
          cards_correct_first_try  = deck_stats.cards_correct_first_try  + EXCLUDED.cards_correct_first_try,
          core_cards_practiced     = deck_stats.core_cards_practiced     + EXCLUDED.core_cards_practiced,
          core_correct_first_try   = deck_stats.core_correct_first_try   + EXCLUDED.core_correct_first_try,
+         cards_added              = deck_stats.cards_added              + EXCLUDED.cards_added,
+         cards_removed            = deck_stats.cards_removed            + EXCLUDED.cards_removed,
          total_cards              = COALESCE(EXCLUDED.total_cards, deck_stats.total_cards),
          total_core_cards         = COALESCE(EXCLUDED.total_core_cards, deck_stats.total_core_cards),
          avg_remote_score         = EXCLUDED.avg_remote_score,
@@ -130,7 +140,8 @@ router.post("/update", authMiddleware, async (req, res) => {
       [req.user.id, deck_id, date, cards_practiced, cards_correct_first_try, core_cards_practiced, core_correct_first_try,
        deck_total_cards, deck_total_core_cards,
        deck_avg_remote, deck_avg_stable, deck_avg_recent,
-       deck_avg_core_remote, deck_avg_core_stable, deck_avg_core_recent]
+       deck_avg_core_remote, deck_avg_core_stable, deck_avg_core_recent,
+       cards_added, cards_removed]
     );
 
     // daily_snapshot weggelaten → user_daily_snapshot niet bijwerken (deprecatiepad).

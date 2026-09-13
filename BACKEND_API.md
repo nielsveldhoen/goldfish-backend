@@ -28,6 +28,7 @@ De backend kent één naamset:
 - `recent_score` bij `POST /review/progress`: **weggelaten = waarde blijft onveranderd**.
 - `avg_recent_score` en `avg_core_remote_score`/`avg_core_stable_score`/`avg_core_recent_score` in `deck_delta`/`daily_snapshot` bij `POST /stats/update`: weggelaten = bestaande waarde blijft staan. (`avg_remote_score`/`avg_stable_score` overschrijven daarentegen altijd, ook met `null`.)
 - `total_cards`/`total_core_cards` in `deck_delta` bij `POST /stats/update`: absolute deckgroottes die de bestaande waarde overschrijven; weggelaten = onveranderd. Bestaande rijen zijn `null` (geen backfill). Oudere clients sturen ze niet mee.
+- `cards_added`/`cards_removed` in `deck_delta` bij `POST /stats/update`: **optelbare tellers** (zoals `cards_practiced`), géén absolute waarden zoals `total_cards`. Weggelaten = delta 0, dus de stand blijft staan. Ze zijn nooit `null`: bestaande rijen staan op `0`. Een gereset kaart stuurt de client als beide tegelijk — zijn voortgang verdwijnt, dus hij verlaat de geoefende verzameling en komt als nieuwe kaart terug.
 
 **Paden:** alle endpoints zitten onder het prefix `/v2` (bijv. `/v2/review/due`). De paden in dit document staan voor de leesbaarheid zonder dat prefix; zet er in de praktijk `/v2` voor. Ongeprefixte paden bestaan niet meer.
 
@@ -1051,6 +1052,8 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
     "cards_correct_first_try": 1,
     "core_cards_practiced": 0,
     "core_correct_first_try": 0,
+    "cards_added": 48,               // optioneel — kaarten die deze dag in dit deck kwamen (telt op; weglaten = 0)
+    "cards_removed": 0,              // optioneel — kaarten die deze dag uit dit deck gingen (telt op; weglaten = 0)
     "total_cards": 42,               // optioneel — absoluut aantal kaarten in dit deck (overschrijft; weglaten = onveranderd)
     "total_core_cards": 18,          // optioneel — absoluut aantal core-kaarten in dit deck (overschrijft; weglaten = onveranderd)
     "avg_remote_score": 3.40,        // actuele gemiddelde remote_score over alle kaarten (overschrijft)
@@ -1093,6 +1096,8 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
     "cards_correct_first_try": 3,
     "core_cards_practiced": 2,
     "core_correct_first_try": 1,
+    "cards_added": 0,
+    "cards_removed": 0,
     "total_cards": 42,
     "total_core_cards": 18,
     "avg_remote_score": "3.40",
@@ -1124,9 +1129,9 @@ Verwerk één beantwoorde kaart: tel delta's op in `deck_stats` en `user_daily_s
 }
 ```
 
-`total_cards`/`total_core_cards` op `deck_stats` zijn de per-deck deckgroottes op die datum; ze zijn `null` zolang ze nog nooit gezet zijn (geen backfill). Wordt `daily_snapshot` weggelaten, dan blijft `user_daily_snapshot` ongemoeid en is `daily_snapshot` in de response `null`.
+`total_cards`/`total_core_cards` op `deck_stats` zijn de per-deck deckgroottes op die datum; ze zijn `null` zolang ze nog nooit gezet zijn (geen backfill). `cards_added`/`cards_removed` zijn de mutaties van die dag en staan standaard op `0`; de client gebruikt ze om een scoredaling in de grafiek te verklaren, want een verse kaart telt in elk gemiddelde als 0 en verdunt de score dus zichtbaar. Wordt `daily_snapshot` weggelaten, dan blijft `user_daily_snapshot` ongemoeid en is `daily_snapshot` in de response `null`.
 
-**Validatie:** de tellervelden (`cards_practiced`, `cards_correct_first_try`, `core_*`, `*_today`) moeten niet-negatieve integers zijn (max 10000 per request) — negatieve of absurde deltas zouden de cumulatieve tellers permanent corrumperen. `total_cards`/`total_core_cards` zijn niet-negatieve integers; de `avg_*`-velden eindige getallen; `date` een geldige datum.
+**Validatie:** de tellervelden (`cards_practiced`, `cards_correct_first_try`, `core_*`, `cards_added`, `cards_removed`, `*_today`) moeten niet-negatieve integers zijn (max 10000 per request) — negatieve of absurde deltas zouden de cumulatieve tellers permanent corrumperen. `total_cards`/`total_core_cards` zijn niet-negatieve integers; de `avg_*`-velden eindige getallen; `date` een geldige datum.
 
 **Foutcodes:**
 - `400` — ontbrekende velden (`date`, `deck_id` of `deck_delta`) of een veld dat de validatie hierboven niet haalt
@@ -1159,6 +1164,8 @@ De rij-objecten hebben exact dezelfde veldnamen als `/stats/deck/:deckId` (`deck
       "cards_correct_first_try": 3,
       "core_cards_practiced": 2,
       "core_correct_first_try": 1,
+      "cards_added": 0,
+      "cards_removed": 0,
       "total_cards": 42,
       "total_core_cards": 18,
       "avg_remote_score": "3.40",
@@ -1226,6 +1233,8 @@ Alleen **levende** (niet-verwijderde) decks van de ingelogde gebruiker tellen me
       "cards_correct_first_try": 3,
       "core_cards_practiced": 2,
       "core_correct_first_try": 1,
+      "cards_added": 0,
+      "cards_removed": 0,
       "avg_remote_score": "3.40",
       "avg_stable_score": "1.80",
       "avg_recent_score": "2.10",
@@ -1259,6 +1268,8 @@ Alle dagelijkse statistieken voor één deck, gesorteerd van nieuw naar oud. Mee
     "cards_correct_first_try": 3,
     "core_cards_practiced": 2,
     "core_correct_first_try": 1,
+    "cards_added": 0,
+    "cards_removed": 0,
     "total_cards": 42,
     "total_core_cards": 18,
     "avg_remote_score": "3.40",

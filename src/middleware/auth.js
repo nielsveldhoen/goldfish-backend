@@ -5,13 +5,29 @@ import { securityEvent, clientIp } from "../utils/securityLog.js";
 const JWT_SECRET = process.env.JWT_SECRET;
 
 // Weigert tokens die vóór het revocatie-watermerk van de gebruiker zijn
-// uitgegeven (users.tokens_valid_after, gezet door POST /auth/logout-all en
-// door een geslaagde wachtwoord-reset). iat is in seconden; een token uit
-// exact dezelfde seconde als het watermerk telt als ingetrokken.
+// uitgegeven (users.tokens_valid_after, gezet door POST /auth/logout-all, door
+// een geslaagde wachtwoord-reset en door een verwijderaanvraag).
+//
+// Het moment van uitgifte komt uit iat_ms (milliseconden, gezet door
+// generateToken), niet uit iat: die heeft maar secondeprecisie, en het
+// watermerk niet. Een verse login in dezelfde seconde als de intrekking gaf
+// daardoor een token dat meteen als ingetrokken werd geweigerd — de gebruiker
+// kreeg een token uit /auth/login dat nergens werkte.
+//
+// Tokens van vóór iat_ms (uitgegeven door oudere code, nog geldig tot hun
+// expiry) vallen terug op iat en houden het oude, strengere gedrag: dezelfde
+// seconde als het watermerk telt daar als ingetrokken. De fallback geldt ook
+// als iat_ms niet bij iat past, zodat een onverwachte waarde de intrekking
+// nooit kan versoepelen.
 export function isRevoked(decoded, tokensValidAfter) {
   if (!tokensValidAfter) return false;
   if (!decoded.iat) return true; // tokens zonder iat zijn niet te beoordelen
-  return decoded.iat * 1000 < tokensValidAfter.getTime();
+  const trustIatMs =
+    typeof decoded.iat_ms === "number" &&
+    Number.isFinite(decoded.iat_ms) &&
+    Math.floor(decoded.iat_ms / 1000) === decoded.iat;
+  const issuedMs = trustIatMs ? decoded.iat_ms : decoded.iat * 1000;
+  return issuedMs < tokensValidAfter.getTime();
 }
 
 // 401's zijn de ruggengraat van de detectie: een piek erin betekent een
