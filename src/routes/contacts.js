@@ -64,25 +64,31 @@ async function fetchContactRow(client, id, viewerId) {
   return rows[0];
 }
 
+// Alle contacten van `userId` als client-objecten. Gedeeld door GET /contacts
+// en de snapshot in /sync/changes (contacten hebben geen tombstones, dus de
+// client vervangt zijn box integraal).
+export async function fetchContactObjects(db, userId) {
+  const { rows } = await db.query(
+    `SELECT c.*,
+            other.id       AS other_id,
+            other.username AS other_username,
+            other.email    AS other_email
+       FROM contacts c
+       JOIN users other
+         ON other.id = CASE WHEN c.requester_id = $1 THEN c.addressee_id ELSE c.requester_id END
+      WHERE c.requester_id = $1 OR c.addressee_id = $1
+      ORDER BY c.created_at DESC`,
+    [userId]
+  );
+  return rows.map((row) => toContactObject(row, userId));
+}
+
 // ========================
 // GET ALL CONTACTS
 // ========================
 router.get("/", authMiddleware, async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT c.*,
-              other.id       AS other_id,
-              other.username AS other_username,
-              other.email    AS other_email
-         FROM contacts c
-         JOIN users other
-           ON other.id = CASE WHEN c.requester_id = $1 THEN c.addressee_id ELSE c.requester_id END
-        WHERE c.requester_id = $1 OR c.addressee_id = $1
-        ORDER BY c.created_at DESC`,
-      [req.user.id]
-    );
-
-    res.json(rows.map((row) => toContactObject(row, req.user.id)));
+    res.json(await fetchContactObjects(pool, req.user.id));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });

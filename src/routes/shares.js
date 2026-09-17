@@ -141,6 +141,8 @@ router.post("/decks/:id/share/accept", authMiddleware, async (req, res) => {
 
     // Eigen andere devices: uitnodiging uit de lijst halen en bijsyncen.
     broadcast(req.user.id, "share_resolved", [{ deck_id: id }]);
+    // De eigenaar: zijn "gedeeld met"-lijsten (sent/overview) zijn verouderd.
+    broadcast(result.rows[0].owner_id, "shares_updated", [{ deck_id: id }]);
 
     res.json(result.rows[0]);
   } catch (err) {

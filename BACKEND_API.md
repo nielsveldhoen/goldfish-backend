@@ -950,8 +950,11 @@ Overzicht van alle decks met het aantal due kaarten en nieuwe kaarten. Handig vo
 ### GET `/sync/changes`
 Geeft alle decks, kaarten en voortgangsrecords terug die gewijzigd zijn na `since`. Inclusief soft-deleted items (zodat de client lokaal kan verwijderen). Omvat naast eigen decks ook **met mij gedeelde decks** (zie [Delen](#delen--publieke-bibliotheek-🔒)); progress blijft strikt van de ingelogde gebruiker. Daarnaast bevat elke delta een **`exams`-snapshot**: de volledige actuele set toegankelijke examens (zie de noot onder de response).
 
+**Deck-rijen en tallies.** Een deck komt in de delta als de deck-rij zelf wijzigde (ook tombstones), als zijn share-rij wijzigde, **of als een van zijn kaarten of de eigen voortgang daarop wijzigde sinds `since`**. Elke deck-rij draagt de tallies van de kijker (`total_count`, `new_count`, `due_count`, plus de `core_*`-tellingen), identiek berekend aan `/review/decks/summary`. Zo kan de client na een delta zijn dashboard bijwerken zonder de summary opnieuw op te halen — ook voor decks waarvan de kaarten niet lokaal staan.
+
 **Query params:**
 - `since` (optioneel) — ISO 8601 timestamp, bijv. `2026-05-01T00:00:00.000Z`
+- `snapshots` (optioneel) — kommagescheiden uit `contacts`, `groups`. Levert die lijst(en) **integraal** mee als extra veld (`contacts`, `groups`), in dezelfde objectvorm als `GET /contacts` en `GET /groups`. Bedoeld voor sessiestart en na lang offline: de client vervangt zijn cache en leunt daarna op de `contact_*`/`group_*`-events. Onbekende namen worden genegeerd; zonder deze param ontbreken de velden. Bij een `full_resync`-antwoord komen ze niet mee.
 
 **Full-resync-signaal:** soft-deleted rijen (tombstones) worden server-side maar een beperkte tijd bewaard (`TOMBSTONE_RETENTION_DAYS`, default 90 d) en daarna hard verwijderd. Is `since` ouder dan de resync-horizon (`SYNC_RESYNC_HORIZON_DAYS`, default 75 d) — of ontbreekt/leeg, zoals bij een nieuwe installatie — dan kunnen er in dat venster al deletes gepurged zijn die de client nooit gezien heeft. De server geeft dan **geen delta** maar:
 
@@ -981,6 +984,9 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
       "role": "owner",           // "owner" | "recipient"
       "owner_username": "niels",
       "can_edit": true,          // stuurt alle bewerk-guards in de client
+      "total_count": "12",       // kaarten in het deck (zoals /review/decks/summary)
+      "new_count": "4",          // kaarten zonder voortgang
+      "due_count": "2",          // kaarten met due_date <= nu
       "core_total_count": "3",   // totaal aantal core-kaarten in het deck (is_core = true)
       "core_due_count": "1",     // core-kaarten met due_date <= nu
       "core_new_count": "1"      // core-kaarten die nog nooit beoordeeld zijn
@@ -1002,6 +1008,7 @@ De client moet in dat geval zijn lokale state wegdoen en een **volledige** load 
       "id": "uuid",
       "user_id": "uuid",
       "card_id": "uuid",
+      "deck_id": "uuid",                // deck van de kaart, zodat de client de juiste tallies bijwerkt
       "remote_score": 2,
       "stable_score": 3,
       "due_date": "...",
@@ -1318,7 +1325,7 @@ Alle dagelijkse snapshots van de gebruiker, gesorteerd van nieuw naar oud. Gebru
 
 Vrienden op e-mailadres: je stuurt een uitnodiging, de ander accepteert of wijst af. Zolang niet geaccepteerd staat de relatie "in behandeling"; bij afwijzen verdwijnt hij aan beide kanten; bij accepteren zijn beide personen elkaars contact.
 
-**Online-only — staat LOS van de sync-delta.** Contacten zitten **niet** in `GET /sync/changes`, kennen **geen** `deleted_at`/soft-delete en **geen** sync-watermerk. Een verwijderde relatie wordt **hard verwijderd**. De client leest de lijst via `GET /contacts` (bij opstart/hervatten) en verwerkt tussentijdse mutaties via de WebSocket-events `contact_invited` / `contact_accepted` / `contact_rejected`. Voor `contact_`-events schuift de client zijn sync-cursor bewust **niet** door.
+**Snapshot, geen delta.** Contacten kennen **geen** `deleted_at`/soft-delete en **geen** sync-watermerk; een verwijderde relatie wordt **hard verwijderd**. De client krijgt de lijst integraal via `GET /contacts` (pull-to-refresh) of als `contacts`-snapshot in `GET /sync/changes?snapshots=contacts` (sessiestart, na lang offline) en verwerkt tussentijdse mutaties via de WebSocket-events `contact_invited` / `contact_accepted` / `contact_rejected`. Voor `contact_`-events schuift de client zijn sync-cursor bewust **niet** door.
 
 ### Het contact-object
 
@@ -1415,7 +1422,7 @@ Deel een eigen deck met een geaccepteerd contact. Maakt een **uitnodiging** aan 
 ### POST `/decks/:id/share/accept`
 Ontvanger accepteert een openstaande uitnodiging. Deck + kaarten komen daarna integraal mee in de eerstvolgende sync-delta (nieuw-gedeeld-venster). Geen openstaande uitnodiging → `404`.
 
-**Response `200`:** de share-rij. **Realtime:** `share_resolved` (`[ { "deck_id" } ]`) naar eigen andere devices. **Afwijzen** = `DELETE /decks/:id/follow` (zie hieronder).
+**Response `200`:** de share-rij. **Realtime:** `share_resolved` (`[ { "deck_id" } ]`) naar eigen andere devices, en `shares_updated` (`[ { "deck_id" } ]`) naar **de eigenaar** — zijn `GET /shares/sent`/`overview`-cache is verouderd. **Afwijzen** = `DELETE /decks/:id/follow` (zie hieronder).
 
 ### GET `/shares/received`
 Mijn openstaande deck-uitnodigingen (de accepteer/afwijs-lijst): `[ { deck_id, deck_title, description, owner_username, created_at, card_count } ]`.
@@ -1495,7 +1502,7 @@ Archiefvlag van de **ontvanger** op een gedeeld deck (het enige dat een recipien
 
 Besloten clubs met een deelbare **join-code** (identificatie, niet geheim) en een **join-wachtwoord** (geheim, argon2-gehasht). Elke groep heeft een **deck-catalogus**: leden met `can_add_decks` zetten er eigen decks in, en elk lid kiest zélf welke catalogus-decks hij aan zijn dashboard toevoegt (opt-in) — pas dát geeft toegang (share `kind: "group"`).
 
-**Online-only, zoals contacten:** groepen zitten **niet** in de sync-delta. De client leest `GET /groups` en verwerkt mutaties via de WS-events `group_updated` / `group_invite_received` / `group_removed`. In group-responses staan **nooit e-mailadressen** — alleen `user_id` + `username`.
+**Snapshot, zoals contacten:** groepen kennen geen delta. De client leest `GET /groups` (pull-to-refresh) of de `groups`-snapshot in `GET /sync/changes?snapshots=groups` (sessiestart, na lang offline) en verwerkt mutaties via de WS-events `group_updated` / `group_invite_received` / `group_removed`. In group-responses staan **nooit e-mailadressen** — alleen `user_id` + `username`.
 
 ### Het group-object
 
@@ -1728,7 +1735,7 @@ Bulk-endpoints sturen dus **één** event met alle items in de array (geen event
 | `deck_removed`    | toegang verloren: share/uitnodiging ingetrokken, afgewezen, ontvolgd, kick, deck uit catalogus, groep opgeheven | `{ "id": "<deck-id>" }` — client verwijdert deck + kaarten + eigen progress lokaal (en haalt een eventuele uitnodiging uit de pending-lijst) |
 | `shared_deck_state` | PUT `/decks/:id/share-state` (eigen andere devices) | `{ "id": "<deck-id>", "inactive": bool }` |
 | `deck_access_changed` | PUT `/decks/:id/permissions/:user_id` (naar de recipient, alle devices) | `{ "deck_id", "can_edit": bool }` — client werkt de `can_edit` van het lokale deck bij |
-| `shares_updated`  | PUT `/decks/:id/permissions/:user_id` (eigen andere devices van de owner) | `{ "deck_id" }` — hint om een open "Gedeeld met"-overzicht te verversen |
+| `shares_updated`  | PUT `/decks/:id/permissions/:user_id` (eigen andere devices van de owner) | `{ "deck_id" }` — hint om een open "Gedeeld met"-overzicht te verversen Ook naar de eigenaar zodra een ontvanger accepteert (`POST /decks/:id/share/accept`). |
 | `group_updated`   | elke groepsmutatie (join, invite, leden, bevoegdheden, catalogus, naam) — naar alle leden | volledig group-object (client upsert zijn Hive-box) |
 | `group_invite_received` | POST `/groups/:id/invites` (naar het doelwit) | volledig group-object (eigen member-rij heeft `status: "invited"`) |
 | `group_removed`   | je bent geen lid meer (kick, zelf verlaten, invite afgewezen, groep opgeheven) | `{ "id": "<group-id>" }` |

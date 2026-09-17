@@ -70,7 +70,7 @@ export async function fetchExamObjects(db, userId, { examId = null } = {}) {
   }
 
   const { rows } = await db.query(
-    `SELECT e.id, e.owner_id, e.group_id, e.name, e.exam_date,
+    `SELECT e.id, e.owner_id, e.group_id, e.name, e.exam_date, e.grade,
             e.created_at, e.updated_at,
             COALESCE(ed.deck_ids, '{}') AS deck_ids
      FROM exams e
@@ -106,6 +106,79 @@ function pushExamEvent(exam, type, payload) {
     : Promise.resolve(broadcast(exam.owner_id, type, [payload]));
   Promise.resolve(send)
     .catch((err) => console.error(`[exams] ${type} broadcast failed:`, err));
+}
+
+// Kaarten van [deckIds] direct laten vervallen voor iedereen die het examen
+// aangaat (EXAM_PLAN.md besluit 2, HOURLY_SRS_V4_PLAN.md fase 4). Zodra een
+// deck in een examen komt moet je er meteen mee kunnen beginnen; de
+// client-scheduler richt de planning daarna op de examendatum.
+//
+// Draait binnen de transactie van de examen-write, zodat de bump van
+// `updated_at` en het vervallen van de kaarten samen slagen of samen falen.
+// `updated_at = now()` zet de rijen in de `/sync/changes`-delta; een device
+// met een openstaande save_progress op zo'n kaart krijgt een 409 en merget.
+//
+// Alleen rijen die nog NIET due zijn worden aangeraakt, zodat een herhaalde
+// PUT geen ruis in de sync-delta veroorzaakt. Kaarten zonder voortgangsrij
+// (nooit beantwoord) zijn per definitie al "nieuw" en hoeven niets.
+//
+// Er gebeurt niets omgekeerds als een deck het examen VERLAAT: de due-datums
+// moeten dan uit het repetitielog worden herberekend en de server
+// interpreteert dat log niet. Dat doet de client (ExamScheduling) en uploadt
+// het via save_progress.
+async function expireDecksForExam(client, deckIds, { ownerId, groupId }) {
+  if (!deckIds || deckIds.length === 0) return [];
+
+  const userIds = groupId
+    ? (await client.query(
+        `SELECT user_id FROM group_members
+         WHERE group_id = $1 AND status = 'active'`,
+        [groupId]
+      )).rows.map((r) => r.user_id)
+    : [ownerId];
+  if (userIds.length === 0) return [];
+
+  const updated = await client.query(
+    `UPDATE user_card_progress ucp
+        SET due_date = now(), updated_at = now()
+       FROM cards c
+      WHERE ucp.card_id = c.id
+        AND c.deck_id = ANY($1::uuid[])
+        AND c.deleted_at IS NULL
+        AND ucp.deleted_at IS NULL
+        AND ucp.user_id = ANY($2::uuid[])
+        AND (ucp.due_date IS NULL OR ucp.due_date > now())
+      RETURNING ucp.user_id`,
+    [deckIds, userIds]
+  );
+
+  // Per user één teller, zodat de WS-fan-out één event per user is.
+  const perUser = new Map();
+  for (const row of updated.rows) {
+    perUser.set(row.user_id, (perUser.get(row.user_id) ?? 0) + 1);
+  }
+  return [...perUser.entries()].map(([userId, count]) => ({ userId, count }));
+}
+
+// Na de COMMIT: elk betrokken device weten dat zijn voortgang is verschoven.
+// De payload draagt geen rijen — de client haalt de delta op via
+// /sync/changes, precies zoals bij elke andere progress-wijziging.
+function pushExpiryEvents(expired, deckIds) {
+  for (const { userId, count } of expired) {
+    try {
+      broadcast(userId, "progress_expired", [{ deck_ids: deckIds, count }]);
+    } catch (err) {
+      console.error("[exams] progress_expired broadcast failed:", err);
+    }
+  }
+}
+
+// Een examen dat geweest is krijgt geen decks meer (besluit Niels
+// 2026-09-16): de planning kan er niets meer mee, en de client negeert een
+// verlopen examen toch al voor de scheduling (EXAM_PLAN.md besluit 7).
+// Losmaken blijft wél toegestaan — opruimen moet altijd kunnen.
+function examHasPassed(examDate) {
+  return new Date(examDate) <= new Date();
 }
 
 function invalidDeckIds(deck_ids) {
@@ -227,8 +300,16 @@ router.post("/", authMiddleware, requireEntitlement(ENTITLEMENTS.EXAM_PLANNING),
         );
       }
 
+      // Alleen voor een examen dat nog moet komen: bij een datum in het
+      // verleden negeert de client de planning toch (besluit 7).
+      const expired = new Date(exam_date) > new Date()
+        ? await expireDecksForExam(client, deckIds,
+            { ownerId: req.user.id, groupId: group_id ?? null })
+        : [];
+
       await client.query("COMMIT");
 
+      pushExpiryEvents(expired, deckIds);
       const exam = await fetchExamObject(pool, req.user.id, inserted.rows[0].id);
       pushExamEvent(exam, "exam_updated", exam);
       res.status(201).json(exam);
@@ -287,6 +368,12 @@ router.put("/:id", authMiddleware, requireEntitlement(ENTITLEMENTS.EXAM_PLANNING
         return res.status(409).json({ error: "stale_write", current: currentObject });
       }
 
+      // Decks die NIEUW bij dit examen komen krijgen de vervalbehandeling;
+      // decks die al gekoppeld waren niet (anders zou elke naamswijziging de
+      // hele planning resetten). Een examendatum die naar voren of naar
+      // achteren schuift telt wél voor álle gekoppelde decks: de planning
+      // moet dan op de nieuwe datum worden gericht.
+      let newlyLinked = [];
       if (deck_ids !== undefined) {
         const deckIds = [...new Set(deck_ids ?? [])];
         const scopeError = await invalidDeckScope(client, deckIds, {
@@ -297,6 +384,16 @@ router.put("/:id", authMiddleware, requireEntitlement(ENTITLEMENTS.EXAM_PLANNING
           await client.query("ROLLBACK");
           return res.status(400).json({ error: scopeError });
         }
+        const existing = await client.query(
+          `SELECT deck_id FROM exam_decks WHERE exam_id = $1`, [id]
+        );
+        const had = new Set(existing.rows.map((r) => r.deck_id));
+        newlyLinked = deckIds.filter((d) => !had.has(d));
+        if (newlyLinked.length > 0
+            && examHasPassed(exam_date ?? exam.exam_date)) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ error: "exam_has_passed" });
+        }
         await client.query(`DELETE FROM exam_decks WHERE exam_id = $1`, [id]);
         if (deckIds.length > 0) {
           await client.query(
@@ -305,6 +402,12 @@ router.put("/:id", authMiddleware, requireEntitlement(ENTITLEMENTS.EXAM_PLANNING
             [id, deckIds]
           );
         }
+      }
+      if (exam_date && new Date(exam_date).getTime() !== exam.exam_date.getTime()) {
+        const all = await client.query(
+          `SELECT deck_id FROM exam_decks WHERE exam_id = $1`, [id]
+        );
+        newlyLinked = all.rows.map((r) => r.deck_id);
       }
 
       // Altijd uitvoeren, ook bij een pure deck_ids-wijziging: de
@@ -316,8 +419,15 @@ router.put("/:id", authMiddleware, requireEntitlement(ENTITLEMENTS.EXAM_PLANNING
         [name ?? null, exam_date ?? null, id]
       );
 
+      const effectiveDate = exam_date ?? exam.exam_date;
+      const expired = new Date(effectiveDate) > new Date()
+        ? await expireDecksForExam(client, newlyLinked,
+            { ownerId: exam.owner_id, groupId: exam.group_id })
+        : [];
+
       await client.query("COMMIT");
 
+      pushExpiryEvents(expired, newlyLinked);
       const examObject = await fetchExamObject(pool, req.user.id, id);
       pushExamEvent(examObject, "exam_updated", examObject);
       res.json(examObject);
@@ -329,6 +439,65 @@ router.put("/:id", authMiddleware, requireEntitlement(ENTITLEMENTS.EXAM_PLANNING
       client.release();
     }
   });
+
+// ========================
+// PUT /exams/:id/grade — cijfer vastleggen (géén entitlement)
+// ========================
+// Bewust niet pro-gated, net als DELETE: een cijfer is geen planning maar een
+// verslag van iets dat al gebeurd is, en de app biedt het uit zichzelf aan
+// zodra een examen verlopen is (besluit Niels 2026-09-16). Een pro-muur op
+// een popup die de gebruiker niet zelf opende, leest als een storing.
+//
+// Vrije tekst (max 16): "7,5" in Nederland, "A" of "voldoende" elders. De
+// backend rekent er niet mee. `null` of "" wist het cijfer weer.
+//
+// Alleen voor een examen dat geweest is (besluit Niels 2026-09-16): een
+// cijfer hoort bij een uitslag, niet bij een planning. Wissen mag altijd,
+// zodat een per ongeluk ingevuld cijfer weg kan als de datum later opschuift.
+router.put("/:id/grade", authMiddleware, async (req, res) => {
+  const { id } = req.params;
+  const { grade } = req.body;
+
+  if (!UUID_RE.test(id)) {
+    return res.status(404).json({ error: "Exam not found" });
+  }
+  if (grade !== null && grade !== undefined) {
+    const invalid = invalidString(grade, "grade", 16);
+    if (invalid) return res.status(400).json({ error: invalid });
+  }
+  const value = (grade === null || grade === undefined || grade === "")
+    ? null
+    : grade.trim();
+
+  try {
+    const current = await pool.query(
+      `SELECT e.exam_date FROM exams e
+        WHERE e.id = $1 AND ${canWriteExamSql("e", "$2")}`,
+      [id, req.user.id]
+    );
+    if (current.rowCount === 0) {
+      return res.status(404).json({ error: "Exam not found" });
+    }
+    if (value !== null && !examHasPassed(current.rows[0].exam_date)) {
+      return res.status(400).json({ error: "exam_not_yet_taken" });
+    }
+    const updated = await pool.query(
+      `UPDATE exams e SET grade = $1
+        WHERE e.id = $2 AND ${canWriteExamSql("e", "$3")}
+        RETURNING e.id`,
+      [value, id, req.user.id]
+    );
+    if (updated.rowCount === 0) {
+      return res.status(404).json({ error: "Exam not found" });
+    }
+    const exam = await fetchExamObject(pool, req.user.id, id);
+    pushExamEvent(exam, "exam_updated", exam);
+    res.json(exam);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
 // ========================
 // DELETE /exams/:id — hard delete (bewust zónder entitlement: opruimen is vrij)

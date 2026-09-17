@@ -137,20 +137,24 @@ async function activeMembership(db, groupId, userId, { forUpdate = false } = {})
   return rows[0] ?? null;
 }
 
+// Alle groepen waar `userId` lid van is (ook openstaande invites/verzoeken).
+// Gedeeld door GET /groups en de snapshot in /sync/changes.
+export async function fetchGroupsForUser(db, userId) {
+  const { rows } = await db.query(
+    `SELECT m.group_id FROM group_members m
+     JOIN groups g ON g.id = m.group_id
+     WHERE m.user_id = $1 AND g.deleted_at IS NULL`,
+    [userId]
+  );
+  return fetchGroupObjects(db, rows.map((r) => r.group_id));
+}
+
 // ========================
 // GET /groups — alle groepen waar ik lid van ben (ook openstaande invites)
 // ========================
 router.get("/", authMiddleware, async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT m.group_id FROM group_members m
-       JOIN groups g ON g.id = m.group_id
-       WHERE m.user_id = $1 AND g.deleted_at IS NULL`,
-      [req.user.id]
-    );
-
-    const groups = await fetchGroupObjects(pool, rows.map((r) => r.group_id));
-    res.json(groups);
+    res.json(await fetchGroupsForUser(pool, req.user.id));
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });

@@ -3,6 +3,41 @@ import { pool } from "../db.js";
 import { authMiddleware } from "../middleware/auth.js";
 import { SYNC_RESYNC_HORIZON_DAYS, SYNC_WATERMARK_OVERLAP_SECONDS } from "../config/retention.js";
 import { fetchExamObjects } from "./exams.js";
+import { fetchContactObjects } from "./contacts.js";
+import { fetchGroupsForUser } from "./groups.js";
+
+// Snapshots die de client optioneel meevraagt (?snapshots=contacts,groups):
+// laag-cardinale lijsten zonder tombstones, integraal geleverd zodat de client
+// zijn box vervangt — net als examens, maar alleen op verzoek (sessiestart, of
+// na lang offline) omdat groepsobjecten met ledenlijsten niet klein zijn.
+const SNAPSHOT_KINDS = new Set(["contacts", "groups"]);
+
+function requestedSnapshots(raw) {
+  if (typeof raw !== "string" || raw === "") return new Set();
+  return new Set(raw.split(",").map((s) => s.trim()).filter((s) => SNAPSHOT_KINDS.has(s)));
+}
+
+// Tellingen per deck voor de kijker, identiek aan /review/decks/summary:
+// kaarten die niet verwijderd zijn, met de eigen (niet-verwijderde)
+// voortgangsrij. Meegeleverd op elke deck-rij in de delta, zodat een
+// voortgangs- of kaartwijziging op een ander apparaat de dashboardtallies
+// bijwerkt zonder aparte summary-fetch.
+const TALLY_SQL = `
+           (SELECT COUNT(*) FROM cards c
+             WHERE c.deck_id = d.id AND c.deleted_at IS NULL
+           ) AS total_count,
+           (SELECT COUNT(*) FROM cards c
+              LEFT JOIN user_card_progress ucp
+                ON ucp.card_id = c.id AND ucp.user_id = $1 AND ucp.deleted_at IS NULL
+             WHERE c.deck_id = d.id AND c.deleted_at IS NULL
+               AND (ucp.repetitions IS NULL OR ucp.repetitions = '')
+           ) AS new_count,
+           (SELECT COUNT(*) FROM cards c
+              JOIN user_card_progress ucp
+                ON ucp.card_id = c.id AND ucp.user_id = $1 AND ucp.deleted_at IS NULL
+             WHERE c.deck_id = d.id AND c.deleted_at IS NULL
+               AND ucp.due_date <= NOW()
+           ) AS due_count,`;
 
 const router = express.Router();
 
@@ -11,6 +46,7 @@ const router = express.Router();
 // ========================
 router.get("/changes", authMiddleware, async (req, res) => {
   const { since } = req.query;
+  const snapshots = requestedSnapshots(req.query.snapshots);
 
   // Geldig ISO-formaat blijft vereist als `since` is meegegeven (behoud 400).
   let sinceDate = null;
@@ -52,15 +88,18 @@ router.get("/changes", authMiddleware, async (req, res) => {
       [SYNC_WATERMARK_OVERLAP_SECONDS]
     );
 
-    const [decksResult, cardsResult, progressResult, removedResult, exams] = await Promise.all([
+    const [decksResult, cardsResult, progressResult, removedResult, exams, contacts, groups] = await Promise.all([
       // Eigen decks + decks met een actieve share-rij. Voor gedeelde decks
       // geldt een extra venster: is de shárerij nieuw/gewijzigd sinds `since`
       // (nieuw gedeeld, her-gedeeld, archiefvlag), dan komt het deck mee ook
       // al is d.updated_at oud. Tombstones (deleted_at gezet) lopen voor
       // beide rollen via d.updated_at, dat de soft-delete-UPDATE bijwerkt.
+      // Derde tak: een deck waarvan kaarten of eigen voortgang sinds `since`
+      // wijzigden komt (levend) mee, zodat zijn tallies (TALLY_SQL) meereizen.
       pool.query(
         `SELECT d.*,
            CASE WHEN d.user_id = $1 THEN 'owner' ELSE 'recipient' END AS role,
+           ${TALLY_SQL}
            _ou.username AS owner_username,
            CASE WHEN d.user_id = $1 THEN true
                 ELSE COALESCE(sh.can_edit, false) END AS can_edit,
@@ -106,6 +145,14 @@ router.get("/changes", authMiddleware, async (req, res) => {
          ) sh ON true
          WHERE (d.user_id = $1 AND d.updated_at > $2)
             OR (sh.inactive IS NOT NULL AND (d.updated_at > $2 OR sh.last_update > $2))
+            OR ((d.user_id = $1 OR sh.inactive IS NOT NULL)
+                AND d.deleted_at IS NULL
+                AND (EXISTS (SELECT 1 FROM cards c
+                              WHERE c.deck_id = d.id AND c.updated_at > $2)
+                     OR EXISTS (SELECT 1 FROM cards c
+                                  JOIN user_card_progress ucp
+                                    ON ucp.card_id = c.id AND ucp.user_id = $1
+                                 WHERE c.deck_id = d.id AND ucp.updated_at > $2)))
          ORDER BY d.updated_at ASC`,
         [req.user.id, sinceDate]
       ),
@@ -129,10 +176,13 @@ router.get("/changes", authMiddleware, async (req, res) => {
          ORDER BY c.updated_at ASC`,
         [req.user.id, sinceDate]
       ),
+      // Mét deck_id: de client kan zo de tallies van het juiste deck bijwerken
+      // ook als de kaart zelf (nog) niet lokaal staat.
       pool.query(
-        `SELECT * FROM user_card_progress
-         WHERE user_id = $1 AND updated_at > $2
-         ORDER BY updated_at ASC`,
+        `SELECT ucp.*, c.deck_id FROM user_card_progress ucp
+         JOIN cards c ON c.id = ucp.card_id
+         WHERE ucp.user_id = $1 AND ucp.updated_at > $2
+         ORDER BY ucp.updated_at ASC`,
         [req.user.id, sinceDate]
       ),
       // Toegang verloren (revoke/ontvolgen/kick): geen tombstone — het deck
@@ -155,6 +205,8 @@ router.get("/changes", authMiddleware, async (req, res) => {
       // toegangsverlies (groep verlaten/gekickt/opgeheven) geen tombstones of
       // removed-mechaniek nodig; de set is laag-cardinaal (EXAM_PLAN.md §6).
       fetchExamObjects(pool, req.user.id),
+      snapshots.has("contacts") ? fetchContactObjects(pool, req.user.id) : null,
+      snapshots.has("groups") ? fetchGroupsForUser(pool, req.user.id) : null,
     ]);
 
     res.json({
@@ -167,6 +219,8 @@ router.get("/changes", authMiddleware, async (req, res) => {
       progress: progressResult.rows,
       removed_deck_ids: removedResult.rows.map((r) => r.deck_id),
       exams,
+      ...(contacts ? { contacts } : {}),
+      ...(groups ? { groups } : {}),
     });
 
   } catch (err) {

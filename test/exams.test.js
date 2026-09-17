@@ -42,7 +42,10 @@ after(async () => {
   await closePool();
 });
 
-const EXAM_DATE = "2026-09-14T07:00:00.000Z";
+// Altijd in de toekomst: een examen dat geweest is neemt geen decks meer aan
+// (zie exam-grade.test.js), dus een vaste datum zou deze suite op termijn
+// laten omvallen.
+const EXAM_DATE = new Date(Date.now() + 30 * 864e5).toISOString();
 
 // `since` vlak in het verleden: recente delta, geen full_resync.
 function recentSince() {
