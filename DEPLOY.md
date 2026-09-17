@@ -10,6 +10,7 @@ procesmanager; de webfrontend is een statische Flutter-build op dezelfde server.
 |---|---|---|---|
 | **1. Lokaal draaien** — ontwikkelen, testen, op je telefoon bekijken | `./scripts/dev.sh` | lege lokale DB (podman + `000_baseline.sql`) | nee |
 | **2. Lokaal draaien met echte data** — een bug reproduceren die alleen in jouw account optreedt | `./scripts/dev.sh --db remote` | **productie**, via SSH-tunnel | **ja, schrijvend** |
+| **2b. Lokaal draaien op een kopie van productie** — testen met je eigen decks zonder risico (nieuwe scheduler, sync-wijzigingen) | `./scripts/dev.sh --db copy` | pg_dump van productie, teruggezet in de lokale container | nee (dump is alleen lezen) |
 | **3. Echt deployen** — de wereld ziet het | `./scripts/deploy.sh` + `./scripts/deploy-web.sh` | productie | **ja** |
 
 Doel 1 en 2 zetten dezelfde stapel op — database, backend op `:3000`, webapp op `:8090` — en
@@ -18,6 +19,80 @@ verschillen alleen in waar de data vandaan komt. Doel 3 zet code op de server.
 Twijfel je? Begin bij doel 1. Nieuwe machine? Eerst **[DEV_SETUP.md](DEV_SETUP.md)**.
 
 ---
+
+## Back-up van de productie-database
+
+```bash
+mkdir -p ~/goldfish-backups
+ssh -i ~/.ssh/fedora-hetzner root@178.104.88.142 \
+  'sudo -u postgres pg_dump -Fc goldfish' > ~/goldfish-backups/goldfish-prod-$(date -u +%Y%m%d-%H%M).dump
+```
+
+Alleen lezen op de server; de dump is een custom-format `pg_dump` (~200 kB) en bevat
+schema, data én eigendom. Controleer een verse dump door hem in de lokale container terug
+te zetten en de rijen te tellen:
+
+```bash
+podman exec goldfish-db psql -U postgres -c "DROP DATABASE IF EXISTS goldfish_verify WITH (FORCE);" \
+  -c "CREATE DATABASE goldfish_verify OWNER goldfish;"
+podman exec -i -e PGPASSWORD=goldfish-lokaal goldfish-db \
+  pg_restore -U goldfish -h 127.0.0.1 -d goldfish_verify --no-owner --no-privileges \
+  --exit-on-error --single-transaction < ~/goldfish-backups/<dump>
+podman exec goldfish-db psql -U postgres -d goldfish_verify -tAc \
+  "SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM decks), (SELECT count(*) FROM cards), (SELECT count(*) FROM user_card_progress)"
+podman exec goldfish-db psql -U postgres -c "DROP DATABASE goldfish_verify WITH (FORCE);"
+```
+
+### Terugzetten op productie (destructief!)
+
+Dit wist de huidige productiedata en zet de stand van de dump terug. Alles wat gebruikers
+sinds de dump hebben gedaan is dan weg. Doe het bewust, stap voor stap:
+
+```bash
+DUMP=~/goldfish-backups/goldfish-prod-YYYYMMDD-HHMM.dump
+K=~/.ssh/fedora-hetzner; T=root@178.104.88.142
+
+# 1. backend stil (anders houdt hij verbindingen op de database open)
+ssh -i $K $T "runuser -l goldfish -c 'pm2 stop goldfish-backend'"
+
+# 2. eerst een dump van de HUIDIGE stand, voor het geval het terugzetten fout was
+ssh -i $K $T 'sudo -u postgres pg_dump -Fc goldfish' > ~/goldfish-backups/pre-restore-$(date -u +%Y%m%d-%H%M).dump
+
+# 3. dump naar de server en terugzetten
+scp -i $K "$DUMP" $T:/tmp/restore.dump
+ssh -i $K $T 'sudo -u postgres psql -c "DROP DATABASE goldfish WITH (FORCE);" \
+                                  -c "CREATE DATABASE goldfish OWNER postgres;" \
+  && sudo -u postgres pg_restore -d goldfish --exit-on-error --single-transaction /tmp/restore.dump \
+  && rm /tmp/restore.dump'
+
+# 4. backend weer aan en controleren
+ssh -i $K $T "runuser -l goldfish -c 'pm2 start goldfish-backend'"
+curl -s https://api.goldfish.<domein>/version
+```
+
+De productiedatabase `goldfish` is eigendom van `postgres`; de app verbindt als de rol
+`goldfish`. Die rol staat los van de database en overleeft een drop/restore, dus je hoeft
+hem niet opnieuw aan te maken.
+
+## Doel 2b — lokaal draaien op een kopie van productie
+
+```bash
+./scripts/dev.sh --db copy            # eerste keer: dump ophalen en terugzetten; daarna hergebruik
+./scripts/dev.sh --db copy --fresh    # de kopie weggooien en opnieuw van productie halen
+./scripts/dev.sh --db copy --no-build # zelfde, zonder de webapp opnieuw te bouwen
+```
+
+Wat het doet: `sudo -u postgres pg_dump -Fc goldfish` op de server via SSH (alleen lezen),
+de lokale database `goldfish` in de podman-container droppen en opnieuw aanmaken, de dump
+als de app-rol `goldfish` terugzetten, en een markertabel `_dev_copy_of_prod` met het
+dump-tijdstip aanmaken. `--status` toont dat tijdstip. De SSH-tunnel wordt gesloten, zodat
+niets meer naar productie kan schrijven. Je logt in met je productie-account en -wachtwoord
+(de hashes zitten in de dump). Zolang de marker bestaat hergebruikt `--db copy` de kopie en
+weigert `./scripts/dev.sh` (doel 1) te starten — die verwacht een lege baseline; verwijder
+dan eerst de container (`podman rm -f goldfish-db`) of gebruik `--db copy`.
+
+`min_client_build` staat in de kopie op de productiewaarde (8), dus de `--status`-hint
+"min_client_build > 0 ⇒ productie" gaat hier niet op; kijk naar de regel `database:`.
 
 ## Doel 1 — lokaal draaien (lege database)
 

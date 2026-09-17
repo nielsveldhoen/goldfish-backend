@@ -4,13 +4,18 @@
 #
 #   ./scripts/dev.sh                  # lokale database (podman)
 #   ./scripts/dev.sh --db remote      # PRODUCTIE-database via een SSH-tunnel
+#   ./scripts/dev.sh --db copy        # KOPIE van de productie-DB in de lokale container
+#   ./scripts/dev.sh --db copy --fresh  # … en die kopie eerst opnieuw ophalen
 #   ./scripts/dev.sh --no-build       # bestaande build/web hergebruiken (scheelt ~30 s)
 #   ./scripts/dev.sh --status         # wat draait er, en waar
 #   ./scripts/dev.sh --stop           # alles afsluiten
 #
 # Wat het opzet:
 #   1. database   — podman-container met migrations/000_baseline.sql, OF een
-#                   SSH-tunnel naar de productie-DB op 127.0.0.1:5433
+#                   SSH-tunnel naar de productie-DB op 127.0.0.1:5433, OF een
+#                   pg_dump van productie teruggezet in diezelfde container
+#                   (--db copy: echte data, maar niets raakt productie; een
+#                   bestaande kopie wordt hergebruikt tot je --fresh meegeeft)
 #   2. backend    — node src/index.js op 0.0.0.0:3000
 #   3. webapp     — flutter build web + een statische server op :8090
 #   4. verificatie— /version, de webapp, en de URL's die je op je telefoon opent
@@ -62,12 +67,15 @@ mkdir -p "$RUN_DIR"
 # ── ARGUMENTEN ────────────────────────────────────────────────────────────────
 DB_MODE=local
 DO_BUILD=1
+FRESH_COPY=0
 ACTION=start
 for arg in "$@"; do
   case "$arg" in
     --db) ;;                              # "--db remote" — de waarde volgt hieronder
     --db=local|local)   DB_MODE=local ;;
     --db=remote|remote) DB_MODE=remote ;;
+    --db=copy|copy)     DB_MODE=copy ;;
+    --fresh)     FRESH_COPY=1 ;;
     --no-build)  DO_BUILD=0 ;;
     --status)    ACTION=status ;;
     --stop)      ACTION=stop ;;
@@ -109,20 +117,36 @@ stop_all() {
   ok "Klaar"
 }
 
+# Staat er een productie-kopie in de lokale container? Print dan het tijdstip
+# van de dump (leeg = geen kopie / geen database).
+local_copy_stamp() {
+  podman exec "$DB_CONTAINER" psql -U postgres -d goldfish -tAc \
+    "SELECT to_char(taken_at, 'YYYY-MM-DD HH24:MI') FROM _dev_copy_of_prod" 2>/dev/null || true
+}
+
 show_status() {
   step "Status"
-  podman container exists "$DB_CONTAINER" 2>/dev/null \
-    && info "database:  container '$DB_CONTAINER' draait op :$DB_PORT" \
-    || info "database:  container draait niet"
+  if podman container exists "$DB_CONTAINER" 2>/dev/null; then
+    local stamp; stamp="$(local_copy_stamp)"
+    if [[ -n "$stamp" ]]; then
+      info "database:  container '$DB_CONTAINER' op :$DB_PORT — KOPIE van productie (stand $stamp)"
+    else
+      info "database:  container '$DB_CONTAINER' op :$DB_PORT — lokale baseline"
+    fi
+  else
+    info "database:  container draait niet"
+  fi
   ss -tln 2>/dev/null | grep -q ":$TUNNEL_PORT" \
     && info "tunnel:    127.0.0.1:$TUNNEL_PORT → productie-DB" \
     || info "tunnel:    niet open"
   if curl -s --max-time 3 "http://127.0.0.1:$API_PORT/version" >/dev/null 2>&1; then
     local v; v="$(curl -s --max-time 3 "http://127.0.0.1:$API_PORT/version")"
     info "backend:   :$API_PORT — $v"
-    grep -q '"min_client_build":0' <<<"$v" \
-      && info "           (min_client_build 0 ⇒ lokale database)" \
-      || info "           (min_client_build > 0 ⇒ PRODUCTIE-database)"
+    if ss -tln 2>/dev/null | grep -q ":$TUNNEL_PORT"; then
+      info "           (tunnel open ⇒ vermoedelijk PRODUCTIE-database; check backend.log)"
+    else
+      info "           (geen tunnel ⇒ lokale container; kopie of baseline, zie 'database:')"
+    fi
   else
     info "backend:   draait niet"
   fi
@@ -139,7 +163,7 @@ esac
 # ── 1. DATABASE ───────────────────────────────────────────────────────────────
 step "1/4  Database ($DB_MODE)"
 
-if [[ "$DB_MODE" == local ]]; then
+ensure_local_container() {
   command -v podman >/dev/null || die "podman ontbreekt (of gebruik een systeem-PostgreSQL; zie DEV_SETUP.md)."
   if podman container exists "$DB_CONTAINER" 2>/dev/null; then
     info "container '$DB_CONTAINER' draait al"
@@ -151,14 +175,27 @@ if [[ "$DB_MODE" == local ]]; then
       || die "Postgres in de container kwam niet op."
     info "container gestart op :$DB_PORT"
   fi
+  if ! podman exec "$DB_CONTAINER" psql -U postgres -tAc \
+        "SELECT 1 FROM pg_roles WHERE rolname='goldfish'" | grep -q 1; then
+    podman exec "$DB_CONTAINER" psql -U postgres -q \
+      -c "CREATE ROLE goldfish LOGIN PASSWORD '$DB_PASSWORD';"
+    info "rol goldfish aangemaakt"
+  fi
+}
 
-  # Rol, database en baseline alleen aanmaken als ze er nog niet zijn.
+if [[ "$DB_MODE" == local ]]; then
+  ensure_local_container
+  if [[ -n "$(local_copy_stamp)" ]]; then
+    die "De lokale container bevat een KOPIE van productie (stand $(local_copy_stamp)).
+    Gebruik --db copy om daarmee verder te werken, of verwijder de container
+    (podman rm -f $DB_CONTAINER) voor een lege baseline."
+  fi
+  # Database en baseline alleen aanmaken als ze er nog niet zijn.
   if ! podman exec "$DB_CONTAINER" psql -U postgres -tAc \
         "SELECT 1 FROM pg_database WHERE datname='goldfish'" | grep -q 1; then
     podman exec "$DB_CONTAINER" psql -U postgres -q \
-      -c "CREATE ROLE goldfish LOGIN PASSWORD '$DB_PASSWORD';" \
       -c "CREATE DATABASE goldfish OWNER goldfish;"
-    info "rol en database aangemaakt"
+    info "database aangemaakt"
   fi
   applied="$(podman exec "$DB_CONTAINER" psql -U postgres -d goldfish -tAc \
     "SELECT count(*) FROM schema_migrations" 2>/dev/null || echo 0)"
@@ -172,6 +209,46 @@ if [[ "$DB_MODE" == local ]]; then
   fi
   export DATABASE_URL="postgresql://goldfish:$DB_PASSWORD@localhost:$DB_PORT/goldfish"
   ok "Lokale database klaar (leeg: geen accounts, geen decks)"
+
+elif [[ "$DB_MODE" == copy ]]; then
+  ensure_local_container
+  # Een eventuele tunnel dicht: alles moet aantoonbaar lokaal zijn.
+  pkill -f "L $TUNNEL_PORT:127.0.0.1:5432" 2>/dev/null && info "SSH-tunnel gesloten" || true
+  stamp="$(local_copy_stamp)"
+  if [[ -n "$stamp" && "$FRESH_COPY" -eq 0 ]]; then
+    info "bestaande kopie hergebruikt (stand $stamp); verse kopie: --db copy --fresh"
+  else
+    [[ -f "$SSH_KEY" ]] || die "SSH-sleutel niet gevonden: $SSH_KEY"
+    DUMP="$RUN_DIR/prod-copy.dump"
+    info "pg_dump van productie ophalen (alleen lezen) …"
+    ssh -i "$SSH_KEY" -o ConnectTimeout=15 "$SSH_TARGET" \
+      "sudo -u postgres pg_dump -Fc --no-owner --no-privileges goldfish" > "$DUMP" \
+      || die "pg_dump op $SSH_TARGET mislukte."
+    [[ -s "$DUMP" ]] || die "Lege dump ontvangen."
+    taken_at="$(date -u +'%Y-%m-%d %H:%M:%SZ')"
+    info "dump: $(du -h "$DUMP" | cut -f1) — stand $taken_at"
+    # De backend mag niet meer aan de oude database hangen als we hem droppen.
+    kill_backend
+    podman exec "$DB_CONTAINER" psql -U postgres -q \
+      -c "DROP DATABASE IF EXISTS goldfish WITH (FORCE);" \
+      -c "CREATE DATABASE goldfish OWNER goldfish;"
+    # Terugzetten als de app-rol zelf, zodat alle objecten van goldfish zijn
+    # (pgcrypto is een trusted extension: de database-eigenaar mag 'm maken).
+    podman exec -i -e PGPASSWORD="$DB_PASSWORD" "$DB_CONTAINER" \
+      pg_restore -U goldfish -h 127.0.0.1 -d goldfish --no-owner --no-privileges \
+      --exit-on-error --single-transaction < "$DUMP" \
+      || die "pg_restore mislukte (dump: $DUMP)."
+    podman exec -e PGPASSWORD="$DB_PASSWORD" "$DB_CONTAINER" \
+      psql -U goldfish -h 127.0.0.1 -d goldfish -q \
+      -c "CREATE TABLE _dev_copy_of_prod (taken_at timestamptz NOT NULL);" \
+      -c "INSERT INTO _dev_copy_of_prod VALUES ('$taken_at');"
+    rm -f "$DUMP"
+    stamp="$(local_copy_stamp)"
+    info "kopie teruggezet: $(podman exec "$DB_CONTAINER" psql -U postgres -d goldfish -tAc \
+      "SELECT count(*) || ' users, ' || (SELECT count(*) FROM decks) || ' decks, ' || (SELECT count(*) FROM cards) || ' cards' FROM users")"
+  fi
+  export DATABASE_URL="postgresql://goldfish:$DB_PASSWORD@localhost:$DB_PORT/goldfish"
+  ok "Kopie van de productie-database klaar (stand $stamp) — productie wordt niet geraakt"
 
 else
   [[ -f "$SSH_KEY" ]] || die "SSH-sleutel niet gevonden: $SSH_KEY"
@@ -296,6 +373,9 @@ fi
 printf '\n%sOpenen:%s  %s\n' "$BOLD" "$OFF" "$WEB_URL"
 if [[ "$DB_MODE" == remote ]]; then
   printf '%sLet op:%s je werkt in de PRODUCTIE-database — echte accounts, echte data.\n' "$RED" "$OFF"
+elif [[ "$DB_MODE" == copy ]]; then
+  printf 'KOPIE van productie (stand %s): je eigen account en decks, wachtwoord\n' "$(local_copy_stamp)"
+  printf 'als op productie. Niets hiervan raakt de echte database. Verse kopie: --db copy --fresh\n'
 else
   printf 'Lokale database: leeg. Registreren kan, maar inloggen vraagt een geverifieerd\n'
   printf 'account — zonder RESEND_API_KEY doe je dat met de hand:\n'
