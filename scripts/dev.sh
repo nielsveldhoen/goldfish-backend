@@ -103,6 +103,52 @@ kill_backend() {
   (( killed )) && info "oude backend gestopt" || info "geen oude backend gevonden"
 }
 
+# De productie-tunnel draait onder een bewaker die ssh herstart zodra de
+# verbinding wegvalt. Een losse `ssh -f` bleef na een netwerkhik dicht; de
+# backend kreeg dan ECONNREFUSED, elke write uit de app een 500, en de
+# wachtrij op de telefoon liep vol zonder dat iemand het zag.
+TUNNEL_PATTERN="L $TUNNEL_PORT:127.0.0.1:5432"
+KEEPER_TAG="goldfish-tunnel-keeper"
+
+close_tunnel() {
+  # Eerst de bewaker, anders start hij de tunnel meteen opnieuw.
+  pkill -f "$KEEPER_TAG" 2>/dev/null && info "tunnelbewaker gestopt" || true
+  pkill -f "$TUNNEL_PATTERN" 2>/dev/null && info "SSH-tunnel gesloten" || true
+}
+
+open_tunnel() {
+  close_tunnel
+  for i in $(seq 1 10); do port_busy "$TUNNEL_PORT" || break; sleep 0.5; done
+  # Argumenten via $1..$3, zodat de commandline van de bewaker zelf niet op
+  # TUNNEL_PATTERN matcht (alleen de ssh eronder doet dat).
+  ( nohup bash -c '
+      while true; do
+        echo "[$(date -Is)] tunnel openen"
+        ssh -i "$1" -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
+          -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+          -L "$2:127.0.0.1:5432" "$3"
+        rc=$?
+        echo "[$(date -Is)] tunnel weg (exit $rc) — over 5 s opnieuw"
+        sleep 5
+      done' "$KEEPER_TAG" "$SSH_KEY" "$TUNNEL_PORT" "$SSH_TARGET" \
+      >>"$RUN_DIR/tunnel.log" 2>&1 & ) >/dev/null 2>&1 </dev/null
+  for i in $(seq 1 30); do port_busy "$TUNNEL_PORT" && break; sleep 0.5; done
+  port_busy "$TUNNEL_PORT" || die "Kon de SSH-tunnel niet openen. Log: $RUN_DIR/tunnel.log"
+  info "tunnel geopend: 127.0.0.1:$TUNNEL_PORT → $SSH_TARGET (met bewaker, log: $RUN_DIR/tunnel.log)"
+}
+
+# host:port van de database waar de draaiende backend mee verbonden is, gelezen
+# uit de environment van het proces op API_PORT (zonder wachtwoord). Leeg als
+# er geen backend draait of het proces niet van ons is.
+backend_db() {
+  local pid
+  pid="$(ss -tlnp 2>/dev/null | grep ":$API_PORT[[:space:]]" | grep -oP 'pid=\K[0-9]+' | head -1)"
+  [[ -n "$pid" && -r "/proc/$pid/environ" ]] || return 0
+  tr '\0' '\n' <"/proc/$pid/environ" | grep -m1 '^DATABASE_URL=' | cut -d= -f2- \
+    | python3 -c 'import sys, urllib.parse; u = urllib.parse.urlsplit(sys.stdin.read().strip()); print(f"{u.hostname}:{u.port}")' \
+    2>/dev/null || true
+}
+
 # ── STOP / STATUS ─────────────────────────────────────────────────────────────
 stop_all() {
   step "Afsluiten"
@@ -110,7 +156,7 @@ stop_all() {
   pkill -f "serve_web.py $WEB_PORT" 2>/dev/null \
     || pkill -f "http.server $WEB_PORT" 2>/dev/null \
     && info "webserver gestopt" || info "webserver draaide niet"
-  pkill -f "L $TUNNEL_PORT:127.0.0.1:5432" 2>/dev/null && info "SSH-tunnel gesloten" || true
+  close_tunnel
   if podman container exists "$DB_CONTAINER" 2>/dev/null; then
     podman stop "$DB_CONTAINER" >/dev/null && info "database gestopt (data is weg: --rm)"
   fi
@@ -136,16 +182,28 @@ show_status() {
   else
     info "database:  container draait niet"
   fi
-  ss -tln 2>/dev/null | grep -q ":$TUNNEL_PORT" \
-    && info "tunnel:    127.0.0.1:$TUNNEL_PORT → productie-DB" \
-    || info "tunnel:    niet open"
+  local tunnel_open=0 keeper=""
+  port_busy "$TUNNEL_PORT" && tunnel_open=1
+  pgrep -f "$KEEPER_TAG" >/dev/null 2>&1 && keeper=" (met bewaker)"
+  (( tunnel_open )) \
+    && info "tunnel:    127.0.0.1:$TUNNEL_PORT → productie-DB$keeper" \
+    || info "tunnel:    niet open$keeper"
   if curl -s --max-time 3 "http://127.0.0.1:$API_PORT/version" >/dev/null 2>&1; then
     local v; v="$(curl -s --max-time 3 "http://127.0.0.1:$API_PORT/version")"
     info "backend:   :$API_PORT — $v"
-    if ss -tln 2>/dev/null | grep -q ":$TUNNEL_PORT"; then
-      info "           (tunnel open ⇒ vermoedelijk PRODUCTIE-database; check backend.log)"
+    # Niet raden uit de tunnel: kijk waar de backend echt heen wijst.
+    local db; db="$(backend_db)"
+    if [[ "$db" == *":$TUNNEL_PORT" ]]; then
+      info "           → PRODUCTIE-database via de tunnel ($db)"
+      (( tunnel_open )) || warn "Tunnel is dicht: de backend kan zijn database niet bereiken.
+    Writes uit de app krijgen een 500 en blijven in de wachtrij staan.
+    Herstel: $0 --db remote --no-build"
+    elif [[ "$db" == *":$DB_PORT" ]]; then
+      info "           → lokale container ($db; kopie of baseline, zie 'database:')"
+    elif [[ -n "$db" ]]; then
+      info "           → database $db"
     else
-      info "           (geen tunnel ⇒ lokale container; kopie of baseline, zie 'database:')"
+      info "           → database onbekend (backend-proces niet leesbaar)"
     fi
   else
     info "backend:   draait niet"
@@ -213,7 +271,7 @@ if [[ "$DB_MODE" == local ]]; then
 elif [[ "$DB_MODE" == copy ]]; then
   ensure_local_container
   # Een eventuele tunnel dicht: alles moet aantoonbaar lokaal zijn.
-  pkill -f "L $TUNNEL_PORT:127.0.0.1:5432" 2>/dev/null && info "SSH-tunnel gesloten" || true
+  close_tunnel
   stamp="$(local_copy_stamp)"
   if [[ -n "$stamp" && "$FRESH_COPY" -eq 0 ]]; then
     info "bestaande kopie hergebruikt (stand $stamp); verse kopie: --db copy --fresh"
@@ -253,14 +311,9 @@ elif [[ "$DB_MODE" == copy ]]; then
 else
   [[ -f "$SSH_KEY" ]] || die "SSH-sleutel niet gevonden: $SSH_KEY"
   warn "PRODUCTIE-database. Alles wat je in de app doet is een echte wijziging."
-  if ss -tln 2>/dev/null | grep -q "127.0.0.1:$TUNNEL_PORT"; then
-    info "tunnel stond al open op :$TUNNEL_PORT"
-  else
-    ssh -i "$SSH_KEY" -N -f -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
-      -L "$TUNNEL_PORT:127.0.0.1:5432" "$SSH_TARGET" \
-      || die "Kon de SSH-tunnel niet openen."
-    info "tunnel geopend: 127.0.0.1:$TUNNEL_PORT → $SSH_TARGET"
-  fi
+  # Altijd vers openen: een al openstaande tunnel kan een losse ssh zonder
+  # bewaker zijn.
+  open_tunnel
   # Wachtwoord uit de server-.env; komt nergens op schijf en wordt niet geprint.
   prod_line="$(ssh -i "$SSH_KEY" -o ConnectTimeout=10 "$SSH_TARGET" \
     "grep -m1 '^DATABASE_URL=' $REMOTE_ENV")" || die "Kan $REMOTE_ENV niet lezen."
