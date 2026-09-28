@@ -46,7 +46,7 @@ fi
 
 step "Webroot opbouwen in $WORK"
 mkdir -p "$WORK/root/app"
-rsync -a --delete --exclude /app/ --exclude README.md "$SITE_DIR/" "$WORK/root/"
+rsync -a --delete --exclude /app/ --exclude README.md --exclude .git --exclude .gitignore "$SITE_DIR/" "$WORK/root/"
 rsync -a --delete "$BUILD_DIR/" "$WORK/root/app/"
 cat > "$WORK/server.conf" <<'EOF'
 server {
@@ -97,6 +97,7 @@ expect /robots.txt                200 'Sitemap'
 expect /sitemap.xml               200 '<urlset'
 expect /flutter_service_worker.js 200 'unregister'
 expect /README.md                 404
+expect /.git/HEAD                 404
 expect /bestaat-niet              404 'noindex'
 expect /app                       301 /app/
 expect /app/                      200 '<base href="/app/">'

@@ -125,9 +125,9 @@ info "lokale main.dart.js md5: $local_md5"
 info "site: $SITE_DIR"
 
 # De site gaat met --delete naar de webroot, maar /app/ is van de app en
-# README.md hoort niet op goldfishstudy.app/README.md.
+# README.md en .git (site/ is een eigen repo) horen niet op goldfishstudy.app.
 site_rsync() {
-  rsync -az --delete "$@" --exclude "/$APP_PATH/" --exclude README.md \
+  rsync -az --delete "$@" --exclude "/$APP_PATH/" --exclude README.md --exclude .git --exclude .gitignore \
     -e "ssh -i $SSH_KEY" "$SITE_DIR/" "$SSH_TARGET:$WEB_ROOT/"
 }
 app_rsync() {
