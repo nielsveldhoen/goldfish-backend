@@ -143,6 +143,10 @@ Het script zet `DISABLE_BACKGROUND_JOBS=1`, waardoor `src/index.js` de dagelijks
 server zelf te doen — niet een tweede instance op een laptop. Controleer in
 `/tmp/goldfish-dev/backend.log` dat er "achtergrondjobs uitgeschakeld" staat.
 
+De tunnel draait onder een bewaker die ssh binnen ~5 s herstart als de verbinding wegvalt
+(log: `/tmp/goldfish-dev/tunnel.log`). Zonder tunnel krijgt de backend `ECONNREFUSED`, elke
+write uit de app een 500, en de wachtrij op je telefoon loopt vol. `--status` waarschuwt dan.
+
 Twijfel je of je op de goede database zit? `./scripts/dev.sh --status` toont het, en `/version`
 verraadt het ook: `min_client_build` is `0` op de lokale baseline en `8` op productie.
 
@@ -242,9 +246,9 @@ tail -f /tmp/goldfish-dev/backend.log
   het bewust, en bouw daarna opnieuw.
 - **`--no-build` na een URL-wissel.** `API_BASE_URL` is een compile-time `--dart-define`; een
   hergebruikte build houdt de oude URL vast. Het script waarschuwt, maar gaat wél door.
-- **Deze build nooit deployen.** In `build/web/` staat nu een app die naar je laptop wijst.
-  `deploy-web.sh` zou die naar productie sturen — bouw eerst opnieuw zonder `--dart-define`, of
-  gebruik `deploy-web.sh --build`.
+- **`build/web/` is van `dev.sh`.** Daar staat een app die naar je laptop wijst en op `/` hoort.
+  `deploy-web.sh` raakt die map niet: het bouwt en deployt `build/web-prod/` (met
+  `--base-href /app/`), en weigert een build met een dev-URL of een verkeerde `<base href>`.
 - **Tailscale down of uitgelogd op het device.** `tailscale status` op beide kanten; de
   serve-mappings zijn tailnet-only en dus onbereikbaar vanaf een normaal netwerk.
 
@@ -254,24 +258,16 @@ tail -f /tmp/goldfish-dev/backend.log
 
 ```bash
 ./scripts/deploy.sh          # backend: tests → rsync → migraties → npm ci → pm2 restart → healthcheck
-./scripts/deploy-web.sh      # webfrontend: build/web/ → /var/www/goldfish (met terugrolkopie)
+./scripts/deploy-web.sh --build   # web: site/ → / en de app (build/web-prod/) → /app/ (met terugrolkopie)
 ```
 
 Draai eerst `./scripts/deploy.sh --dry-run`; dat toont de migratiestand en de rsync-verschillen
 en wijzigt niets op de server. De rest van dit document beschrijft deze twee scripts: wat ze
 stap voor stap doen, hoe je terugrolt, en welke valkuilen eerder zijn misgegaan.
 
-**Let op bij de webdeploy:** `deploy-web.sh` zet de build uit `build/web/` op de server. Heb je
-daar net met `dev.sh` een build in gezet die naar je laptop wijst, dan zou je die naar productie
-sturen. Bouw daarom altijd opnieuw zonder `--dart-define`, of met de productie-URL:
-
-```bash
-cd ~/projects/goldfish/frontend
-flutter build web --release        # zonder dart-define ⇒ https://api.goldfishstudy.app
-cd ~/projects/goldfish/backend && ./scripts/deploy-web.sh
-```
-
-`deploy-web.sh --build` doet precies dat: bouwen zonder overrides, en dan deployen.
+**De webdeploy** zet twee dingen neer: de statische landingspagina's uit `site/` op `/`, en de
+Flutter-app op `/app/`. De app wordt gebouwd naar `build/web-prod/`, los van de `build/web/` die
+`dev.sh` gebruikt, zodat een dev-build nooit per ongeluk naar productie gaat.
 
 ---
 
@@ -288,7 +284,7 @@ cd ~/projects/goldfish/backend && ./scripts/deploy-web.sh
 | Reverse proxy | nginx sites: `goldfish` (apex + www) en `api-goldfishstudy` (proxy → 127.0.0.1:3000, incl. WS-upgrade) |
 | Database | PostgreSQL 18, db `goldfish`, app-rol `goldfish` (DML-only; tabellen zijn van `postgres`) |
 | Env | **`/home/goldfish/backend/src/.env`** (0600) — staat niet in git en gaat **nooit** mee met rsync |
-| Webfrontend | statische build in `/var/www/goldfish`, owner `goldfish:goldfish` |
+| Web | `/var/www/goldfish-site` (site/ op `/`) met de Flutter-build in `app/` (op `/app/`), owner `goldfish:goldfish`. nginx: `nginx/goldfish` + snippet `nginx/goldfish-site.conf` |
 | TLS | Let's Encrypt via `certbot --nginx`, auto-renew via `certbot.timer` |
 | DNS | Cloudflare, **DNS-only / grijze wolk** — proxien breekt certbot én de WebSocket |
 | Backups | dagelijks 03:30 → `/var/backups/goldfish` (14 dagen). **Off-box backup ontbreekt nog** |
@@ -421,46 +417,81 @@ Andere server of sleutel? Alles is te overrulen met environment variables, bijv.
 
 ---
 
-## Webfrontend deployen
+## Web deployen (site + app)
 
-De Flutter-app is een eigen repo (`goldfish-frontend`). Het script zoekt hem op
-`~/projects/goldfish/frontend` (Fedora) en anders op `/mnt/c/programming/goldfish/goldfish_v1`
-(oude WSL-laptop, waar de WSL-kopie verouderd is); een ander pad geef je mee met
-`GOLDFISH_FLUTTER_DIR`.
+Wat er op `goldfishstudy.app` staat, komt uit twee mappen:
 
-```bash
-./scripts/deploy-web.sh --build     # bouwen én deployen (~8 min bouwen)
-./scripts/deploy-web.sh             # alleen de bestaande build/web/ deployen
-```
+| Pad | Bron | Op de server |
+|---|---|---|
+| `/` | `site/` — handgeschreven HTML, geen build (zie `site/README.md`) | `/var/www/goldfish-site/` |
+| `/app/` | de Flutter-app, gebouwd met `--base-href /app/` naar `frontend/build/web-prod/` | `/var/www/goldfish-site/app/` |
 
-Handmatig komt dat neer op:
-
-```bash
-FE=~/projects/goldfish/frontend        # op de oude laptop: /mnt/c/programming/goldfish/goldfish_v1
-
-# Op Linux gewoon de lokale flutter:
-cd $FE && flutter build web --release
-
-# In WSL MOET het de Windows-flutter zijn: de Linux-flutter breekt op de
-# Windows-paden in .dart_tool/package_config.json, en /mnt/c/.../flutter/bin/flutter
-# is vanuit WSL onbruikbaar (CRLF → "/usr/bin/env: 'bash\r'"). Het script kiest
-# deze tak zelf zodra het pad met /mnt/c/ begint:
-cd $FE && cmd.exe /c "flutter build web --release"
-
-# Terugrolkopie — rsync draait met --delete, zonder kopie is de vorige build weg
-ssh -i $KEY $SRV "rm -rf /var/www/goldfish.bak-prev && cp -a /var/www/goldfish /var/www/goldfish.bak-prev"
-
-rsync -az --delete -e "ssh -i $KEY" build/web/ $SRV:/var/www/goldfish/
-ssh -i $KEY $SRV "chown -R goldfish:goldfish /var/www/goldfish"
-```
-
-**Verifiëren doe je op de md5 van `main.dart.js`**, niet op een HTTP 200 — een 200 zegt niets
-over de versie:
+Oude app-paden (`/decks`, `/login/...`, `/deck/:id`, ...) krijgen een 301 naar `/app/...`.
+De nginx-regels staan in de repo: `nginx/goldfish-site.conf` (de logica) en `nginx/goldfish`
+(het server-blok met de certbot-regels, dat de snippet insluit).
 
 ```bash
-curl -s https://goldfishstudy.app/main.dart.js | md5sum
-md5sum $FE/build/web/main.dart.js
+./scripts/deploy-web.sh --build     # app bouwen (~1-8 min) en site + app deployen
+./scripts/deploy-web.sh             # bestaande build/web-prod/ + huidige site/ deployen
+./scripts/deploy-web.sh --dry-run   # laat de rsync-verschillen zien
 ```
+
+Het script zoekt de Flutter-repo op `~/projects/goldfish/frontend` en anders op
+`/mnt/c/programming/goldfish/goldfish_v1` (oude WSL-laptop; daar bouwt het met de
+Windows-flutter via `cmd.exe`, want de Linux-flutter breekt op de Windows-paden). Een ander pad
+geef je mee met `GOLDFISH_FLUTTER_DIR`, de site met `GOLDFISH_SITE_DIR`.
+
+Het weigert een build met een dev-URL (`localhost`, `*.ts.net`) of zonder `<base href="/app/">`.
+`site/README.md` gaat niet mee, en de site-rsync laat `app/` met rust.
+
+### Eerst lokaal testen
+
+```bash
+./scripts/test-site-local.sh --build   # productiebuild + nginx 1.28 in podman op :8095 + controles
+./scripts/test-site-local.sh           # zelfde, zonder opnieuw te bouwen
+./scripts/test-site-local.sh --stop
+```
+
+Draait exact `nginx/goldfish-site.conf` met de webroot zoals `deploy-web.sh` hem neerzet, en
+controleert statuscodes, redirects, 404's, `noindex`, cache-headers, gzip en alle interne links
+van de site. De app in die build praat met de **productie-API**; kijken mag, wat je ingelogd doet
+is echt.
+
+### Verifiëren
+
+**Op de md5 van `main.dart.js`**, niet op een HTTP 200 — een 200 zegt niets over de versie:
+
+```bash
+curl -s https://goldfishstudy.app/app/main.dart.js | md5sum
+md5sum ~/projects/goldfish/frontend/build/web-prod/main.dart.js
+```
+
+### Eenmalig: omschakelen van de oude indeling
+
+Tot de omschakeling serveert nginx de app op `/` uit `/var/www/goldfish`. Volgorde, zodat er
+geen moment zonder werkende site is:
+
+```bash
+# 1. Nieuwe webroot vullen. Raakt de live site niet: nginx wijst nog naar /var/www/goldfish.
+./scripts/deploy-web.sh --build          # eindigt met een md5-waarschuwing; dat klopt nu nog
+
+# 2. nginx omzetten, met terugrolkopie van de huidige config
+scp -i $KEY nginx/goldfish-site.conf $SRV:/etc/nginx/snippets/goldfish-site.conf
+ssh -i $KEY $SRV "cp -a /etc/nginx/sites-available/goldfish /root/nginx-goldfish.bak-\$(date +%Y%m%d-%H%M)"
+scp -i $KEY nginx/goldfish $SRV:/etc/nginx/sites-available/goldfish
+ssh -i $KEY $SRV "nginx -t && systemctl reload nginx"
+
+# 3. Controleren
+curl -s -o /dev/null -w '%{http_code}\n' https://goldfishstudy.app/vs-anki.html     # 200
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' https://goldfishstudy.app/decks  # 301 .../app/decks
+curl -s https://goldfishstudy.app/app/main.dart.js | md5sum                         # = build/web-prod
+```
+
+Faalt `nginx -t`, dan wordt er niet herladen en draait de oude config gewoon door. Terug naar
+de oude indeling: de `.bak`-config terugzetten en `systemctl reload nginx`; `/var/www/goldfish`
+staat er nog. Die map kan weg zodra de nieuwe indeling een tijdje goed draait.
+
+Wijzig je later `nginx/goldfish-site.conf`, dan alleen stap 2 (de snippet) en de reload.
 
 ---
 
@@ -476,11 +507,11 @@ git checkout <vorige-commit>
 git checkout main          # niet vergeten
 ```
 
-**Webfrontend**:
+**Web** (site + app samen; `deploy-web.sh` maakt de kopie vóór elke deploy):
 
 ```bash
-ssh -i $KEY $SRV "rsync -a --delete /var/www/goldfish.bak-prev/ /var/www/goldfish/ && \
-  chown -R goldfish:goldfish /var/www/goldfish"
+ssh -i $KEY $SRV "rsync -a --delete /var/www/goldfish-site.bak-prev/ /var/www/goldfish-site/ && \
+  chown -R goldfish:goldfish /var/www/goldfish-site"
 ```
 
 **Een migratie draait niet vanzelf terug.** De meeste hebben een `_down.sql` — draai die
